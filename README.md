@@ -179,7 +179,8 @@ would be wrong, which in a terminal it is.
 
 Favorites are also the prompt store for scripts and models: the Python client
 lists them with `Client.favorites()` or `rldyour-clipboard list --favorites`,
-and `get` writes one back to stdout for piping.
+`pin`/`unpin` star an entry from a shell, and `get` writes one back to stdout
+for piping.
 
 ### The one real limitation
 
@@ -297,6 +298,8 @@ implements. Python clients can use `pip install rldyour-clipboard`:
 
 ```sh
 rldyour-clipboard list
+rldyour-clipboard list --favorites   # the durable prompt store
+rldyour-clipboard pin 42             # star an entry from a script
 rldyour-clipboard get 42 > screenshot.png
 ```
 

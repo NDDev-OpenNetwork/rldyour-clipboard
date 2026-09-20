@@ -376,6 +376,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     showing.add_argument("entry", type=int)
     showing.add_argument("-m", "--mime")
 
+    pinning = sub.add_parser("pin", help="move an entry into favorites")
+    pinning.add_argument("entry", type=int)
+    unpinning = sub.add_parser("unpin", help="return an entry to the stream")
+    unpinning.add_argument("entry", type=int)
+
     sub.add_parser("stats", help="show what the archive holds")
     sub.add_parser("watch", help="print archive events as they happen")
 
@@ -400,6 +405,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elif command == "get":
                 _, content = client.fetch(arguments.entry, arguments.mime)
                 sys.stdout.buffer.write(content)
+            elif command == "pin":
+                client.pin(arguments.entry, True)
+            elif command == "unpin":
+                client.pin(arguments.entry, False)
             elif command == "stats":
                 report = client.stats()
                 print(f"entries: {report['entries']}")
