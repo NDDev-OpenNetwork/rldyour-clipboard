@@ -328,3 +328,15 @@ def test_optional_fields_left_unset_are_not_sent():
         assert listing == {"op": "list", "req": 1, "limit": 10}
     finally:
         stub.close()
+
+
+def test_favorites_ask_for_pinned_entries():
+    stub = StubDaemon([HELLO, frame({"ev": "list", "req": 1, "items": [{"id": 7}]})])
+    try:
+        with Client(path=stub.path) as client:
+            assert client.favorites() == [{"id": 7}]
+        stub.wait_for(2)
+        listing = next(f for f in stub.received if f.get("op") == "list")
+        assert listing == {"op": "list", "req": 1, "limit": 50, "pinned": True}
+    finally:
+        stub.close()

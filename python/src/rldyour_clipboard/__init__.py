@@ -183,11 +183,22 @@ class Client:
         before: Optional[int] = None,
         query: Optional[str] = None,
         kind: Optional[str] = None,
+        pinned: Optional[bool] = None,
     ) -> list[Summary]:
         answer = self._request(
-            "list", limit=limit, before=before, query=query, kind=kind
+            "list", limit=limit, before=before, query=query, kind=kind, pinned=pinned
         )
         return answer["items"]
+
+    def favorites(
+        self,
+        limit: int = 50,
+        before: Optional[int] = None,
+        query: Optional[str] = None,
+        kind: Optional[str] = None,
+    ) -> list[Summary]:
+        """Return only starred entries — the durable prompt/snippet store."""
+        return self.list(limit=limit, before=before, query=query, kind=kind, pinned=True)
 
     def fetch(
         self,
@@ -355,6 +366,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     listing.add_argument("-n", "--limit", type=int, default=20)
     listing.add_argument("-q", "--query")
     listing.add_argument("-k", "--kind")
+    listing.add_argument(
+        "--favorites",
+        action="store_true",
+        help="only starred entries — the durable prompt store",
+    )
 
     showing = sub.add_parser("get", help="write one entry to standard output")
     showing.add_argument("entry", type=int)
@@ -370,7 +386,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         with Client() as client:
             if command == "list":
                 for entry in client.list(
-                    limit=arguments.limit, query=arguments.query, kind=arguments.kind
+                    limit=arguments.limit,
+                    query=arguments.query,
+                    kind=arguments.kind,
+                    pinned=True if arguments.favorites else None,
                 ):
                     pin = "*" if entry["pinned"] else " "
                     preview = entry["preview"] or f"<{entry['kind']}>"
@@ -384,6 +403,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elif command == "stats":
                 report = client.stats()
                 print(f"entries: {report['entries']}")
+                print(f"favorites: {report['pinned']}")
                 print(f"size:    {_human(report['bytes'])}")
                 budget = report["budget"]
                 print(f"budget:  {'none' if budget >= 2**62 else _human(budget)}")

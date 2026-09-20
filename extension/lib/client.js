@@ -220,7 +220,7 @@ export class Client {
 
     // -- browsing --------------------------------------------------------
 
-    async list({limit = 50, before = null, query = null, kind = null} = {}) {
+    async list({limit = 50, before = null, query = null, kind = null, pinned = null} = {}) {
         const fields = {limit};
         if (before !== null)
             fields.before = before;
@@ -228,6 +228,8 @@ export class Client {
             fields.query = query;
         if (kind)
             fields.kind = kind;
+        if (pinned !== null)
+            fields.pinned = pinned;
         const answer = await this._request('list', fields);
         return answer.items;
     }
