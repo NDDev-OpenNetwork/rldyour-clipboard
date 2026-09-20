@@ -35,6 +35,20 @@ const FILTERS = [
 ];
 
 /**
+ * The two pages the picker shows.
+ *
+ * Recent is the live stream — the newest copies, ten at a time. Favorites is
+ * the durable store: starred entries the daemon never evicts, so a prompt or
+ * an image kept there survives restarts and reboots. They are disjoint on
+ * purpose — starring an entry moves it off the stream onto the page meant to
+ * hold it.
+ */
+const TABS = [
+    {label: 'Recent', pinned: false, pageSize: 10},
+    {label: 'Favorites', pinned: true, pageSize: PAGE},
+];
+
+/**
  * The list of archived entries, with search, filtering and paging.
  *
  * Everything expensive happens in the daemon. This draws rows from summaries
@@ -61,6 +75,7 @@ export const Picker = GObject.registerClass({
 
         this._client = client;
         this._rows = new Map();
+        this._tab = TABS[0];
         this._query = '';
         this._kind = null;
         this._oldest = null;
@@ -70,6 +85,7 @@ export const Picker = GObject.registerClass({
         this._selected = -1;
 
         this.add_child(this._buildSearch());
+        this.add_child(this._buildTabs());
         this.add_child(this._buildFilters());
         // The placeholder is a sibling of the list rather than its first
         // child, so inserting a new row is always an insert at zero.
@@ -102,6 +118,27 @@ export const Picker = GObject.registerClass({
 
         const box = new St.BoxLayout({styleClass: 'rldyour-search-row'});
         box.add_child(this._search);
+        return box;
+    }
+
+    _buildTabs() {
+        const box = new St.BoxLayout({styleClass: 'rldyour-tabs'});
+        this._tabButtons = [];
+
+        for (const tab of TABS) {
+            const button = new St.Button({
+                styleClass: 'rldyour-tab',
+                label: tab.label,
+                canFocus: true,
+                toggleMode: true,
+                xExpand: true,
+            });
+            button.checked = tab === this._tab;
+            button.connect('clicked', () => this._onTabClicked(tab));
+            box.add_child(button);
+            this._tabButtons.push({button, tab});
+        }
+
         return box;
     }
 
@@ -157,13 +194,13 @@ export const Picker = GObject.registerClass({
         });
         box.add_child(this._summary);
 
-        const clear = new St.Button({
+        this._clearButton = new St.Button({
             styleClass: 'rldyour-clear',
             label: 'Clear',
             canFocus: true,
         });
-        clear.connect('clicked', () => this._onClear());
-        box.add_child(clear);
+        this._clearButton.connect('clicked', () => this._onClear());
+        box.add_child(this._clearButton);
 
         return box;
     }
@@ -187,15 +224,16 @@ export const Picker = GObject.registerClass({
 
         try {
             const items = await this._client.list({
-                limit: PAGE,
+                limit: this._tab.pageSize,
                 before: this._oldest,
                 query: this._query || null,
                 kind: this._kind,
+                pinned: this._tab.pinned,
             });
 
             // A short page is the end of the archive, so no further request is
             // made however far the list is scrolled.
-            if (items.length < PAGE)
+            if (items.length < this._tab.pageSize)
                 this._exhausted = true;
             for (const entry of items)
                 this._addRow(entry);
@@ -223,7 +261,9 @@ export const Picker = GObject.registerClass({
         this._scroll.visible = !empty;
         this._empty.text = this._query
             ? 'Nothing matches that.'
-            : 'Nothing here yet. Copy something.';
+            : this._tab.pinned
+                ? 'No favorites yet. Star an entry to keep it here.'
+                : 'Nothing here yet. Copy something.';
     }
 
     // -- rows ------------------------------------------------------------
@@ -258,12 +298,23 @@ export const Picker = GObject.registerClass({
     onArchiveEvent(event) {
         switch (event.ev) {
         case 'added':
-            // Only at the unfiltered top of the list: inserting into a search
-            // result an entry may not match would be a lie about the search.
-            if (!this._query && !this._kind && !this._rows.has(event.entry.id)) {
+            // Only at the unfiltered top of a list the entry belongs on:
+            // inserting into a search an entry may not match would be a lie
+            // about the search, and a fresh copy is never a favorite.
+            if (!this._query && !this._kind
+                && event.entry.pinned === this._tab.pinned
+                && !this._rows.has(event.entry.id)) {
                 this._list.insert_child_at_index(this._makeRow(event.entry), 0);
                 this._showPlaceholder();
             }
+            break;
+        case 'updated':
+            // Both a pin toggle and a re-copy land here; either can move the
+            // entry between the tabs or within the order. Rebuilding is the
+            // only update that is right for every one of those.
+            if (this._rows.has(event.entry.id)
+                || event.entry.pinned === this._tab.pinned)
+                this.refresh();
             break;
         case 'removed':
             this._rows.get(event.entry)?.destroy();
@@ -320,7 +371,7 @@ export const Picker = GObject.registerClass({
 
         case Clutter.KEY_Return:
         case Clutter.KEY_KP_Enter: {
-            const rows = [...this._rows.values()];
+            const rows = this._list.get_children();
             const row = rows[this._selected >= 0 ? this._selected : 0];
             if (row) {
                 // Shift puts the entry on the clipboard without typing the
@@ -337,7 +388,9 @@ export const Picker = GObject.registerClass({
     }
 
     _move(delta) {
-        const rows = [...this._rows.values()];
+        // The list's children are the visual order; _rows is a lookup by id
+        // and its insertion order can lag behind inserted rows.
+        const rows = this._list.get_children();
         if (rows.length === 0)
             return;
 
@@ -351,6 +404,17 @@ export const Picker = GObject.registerClass({
         row.grab_key_focus();
     }
 
+    _onTabClicked(tab) {
+        if (tab === this._tab)
+            return;
+        this._tab = tab;
+        for (const {button, tab: own} of this._tabButtons)
+            button.checked = own === tab;
+        // Clearing history makes no sense from the page history cannot reach.
+        this._clearButton.visible = !tab.pinned;
+        this.refresh();
+    }
+
     _onFilterClicked(kind) {
         this._kind = kind;
         for (const {button, kind: own} of this._filterButtons)
@@ -360,12 +424,8 @@ export const Picker = GObject.registerClass({
 
     _onPin(entry) {
         this._client.pin(entry.id, !entry.pinned)
-            .then(() => {
-                entry.pinned = !entry.pinned;
-                // Pinning changes the sort order, so the list is rebuilt
-                // rather than patched in place.
-                this.refresh();
-            })
+            // The daemon's `updated` broadcast rebuilds the list, moving the
+            // entry to the tab it now belongs on.
             .catch(error => this._report(error));
     }
 
@@ -384,6 +444,7 @@ export const Picker = GObject.registerClass({
             : size(stats.budget);
         this._summary.text =
             `${stats.entries} ${stats.entries === 1 ? 'entry' : 'entries'} · ` +
+            `${stats.pinned} ${stats.pinned === 1 ? 'favorite' : 'favorites'} · ` +
             `${size(stats.bytes)} of ${budget}`;
     }
 
@@ -399,6 +460,9 @@ export const Picker = GObject.registerClass({
     reset() {
         this._search.set_text('');
         this._query = '';
+        // Every open lands on the live stream; the store is one tap away.
+        if (this._tab !== TABS[0])
+            this._onTabClicked(TABS[0]);
     }
 
     destroy() {

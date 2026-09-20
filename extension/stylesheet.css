@@ -39,6 +39,35 @@
     padding-right: 6px;
 }
 
+/* -- tabs ----------------------------------------------------------------- */
+
+.rldyour-tabs {
+    spacing: 4px;
+    padding: 0 2px 4px;
+}
+
+.rldyour-tab {
+    padding: 4px 12px;
+    border-radius: 6px;
+    font-size: 0.9em;
+    font-weight: bold;
+    color: rgba(255, 255, 255, 0.7);
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.rldyour-tab:hover {
+    background-color: rgba(255, 255, 255, 0.13);
+}
+
+.rldyour-tab:checked {
+    color: #ffffff;
+    background-color: rgba(255, 255, 255, 0.22);
+}
+
+.rldyour-tab:focus {
+    border: 1px solid rgba(255, 255, 255, 0.5);
+}
+
 /* -- filters ------------------------------------------------------------ */
 
 .rldyour-filters {
