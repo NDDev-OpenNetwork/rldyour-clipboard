@@ -83,6 +83,7 @@ export const Picker = GObject.registerClass({
         this._loading = false;
         this._searchId = 0;
         this._selected = -1;
+        this._generation = 0;
 
         this.add_child(this._buildSearch());
         this.add_child(this._buildTabs());
@@ -209,6 +210,9 @@ export const Picker = GObject.registerClass({
 
     /** Reloads from the top. Called whenever the picker opens. */
     refresh() {
+        // Bumping the generation marks any page still in flight as stale, so
+        // it is dropped on arrival instead of landing in the rebuilt list.
+        this._generation++;
         this._oldest = null;
         this._exhausted = false;
         this._clearRows();
@@ -221,6 +225,7 @@ export const Picker = GObject.registerClass({
         if (this._loading || this._exhausted)
             return;
         this._loading = true;
+        const generation = this._generation;
 
         try {
             const items = await this._client.list({
@@ -231,18 +236,25 @@ export const Picker = GObject.registerClass({
                 pinned: this._tab.pinned,
             });
 
-            // A short page is the end of the archive, so no further request is
-            // made however far the list is scrolled.
-            if (items.length < this._tab.pageSize)
-                this._exhausted = true;
-            for (const entry of items)
-                this._addRow(entry);
-            if (items.length > 0)
-                this._oldest = items[items.length - 1].id;
-
-            this._showPlaceholder();
+            // A refresh during the request makes this page stale; its rows,
+            // cursor and exhaustion all belong to parameters already gone.
+            if (generation === this._generation) {
+                // A short page is the end of the archive, so no further
+                // request is made however far the list is scrolled.
+                if (items.length < this._tab.pageSize)
+                    this._exhausted = true;
+                for (const entry of items)
+                    this._addRow(entry);
+                if (items.length > 0)
+                    this._oldest = items[items.length - 1].id;
+                this._showPlaceholder();
+            }
         } finally {
             this._loading = false;
+            // The refresh that made this page stale asked for a load that
+            // the _loading guard turned away; run it now.
+            if (generation !== this._generation)
+                this._load().catch(error => this._report(error));
         }
     }
 
@@ -297,17 +309,20 @@ export const Picker = GObject.registerClass({
     /** Applies an archive broadcast without reloading the whole list. */
     onArchiveEvent(event) {
         switch (event.ev) {
-        case 'added':
-            // Only at the unfiltered top of a list the entry belongs on:
-            // inserting into a search an entry may not match would be a lie
-            // about the search, and a fresh copy is never a favorite.
-            if (!this._query && !this._kind
+        case 'added': {
+            // Only at the top of a list the entry provably belongs on. A
+            // search match is the daemon's call — FTS cannot be judged here —
+            // but kind and the page's pinned side are both in the summary.
+            const belongs = !this._query
+                && (!this._kind || event.entry.kind === this._kind)
                 && event.entry.pinned === this._tab.pinned
-                && !this._rows.has(event.entry.id)) {
+                && !this._rows.has(event.entry.id);
+            if (belongs) {
                 this._list.insert_child_at_index(this._makeRow(event.entry), 0);
                 this._showPlaceholder();
             }
             break;
+        }
         case 'updated':
             // Both a pin toggle and a re-copy land here; either can move the
             // entry between the tabs or within the order. Rebuilding is the
@@ -461,8 +476,12 @@ export const Picker = GObject.registerClass({
         this._search.set_text('');
         this._query = '';
         // Every open lands on the live stream; the store is one tap away.
-        if (this._tab !== TABS[0])
-            this._onTabClicked(TABS[0]);
+        // The caller always refresh()es after this, so the state is flipped
+        // without a load of its own.
+        this._tab = TABS[0];
+        for (const {button, tab} of this._tabButtons)
+            button.checked = tab === this._tab;
+        this._clearButton.visible = true;
     }
 
     destroy() {
