@@ -297,6 +297,10 @@ export const Picker = GObject.registerClass({
     }
 
     _addRow(entry) {
+        // A broadcast can insert a row that a page in flight then carries
+        // again — one row per id, whichever arrives second yields.
+        if (this._rows.has(entry.id))
+            return;
         this._list.add_child(this._makeRow(entry));
     }
 
