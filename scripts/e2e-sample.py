@@ -73,8 +73,15 @@ def main() -> int:
         check((summary["width"], summary["height"]) == (600, 300), "dimensions recorded")
         check(summary["thumb"], "a thumbnail is available")
         thumbnail = client.thumb(image_entry)
-        check(thumbnail.startswith(b"\x89PNG"), "the thumbnail is a PNG")
-        check(len(thumbnail) < len(picture), "the thumbnail is smaller than the image")
+        # Served as pixels, not a container: a client that may be a compositor
+        # must not have to decode anything.
+        check(thumbnail.width == 256, "the thumbnail is scaled into the box")
+        check(thumbnail.height == 128, "and keeps the aspect ratio")
+        check(thumbnail.stride == thumbnail.width * 4, "rows are tightly packed")
+        check(
+            len(thumbnail.pixels) == thumbnail.stride * thumbnail.height,
+            "the payload is exactly the pixels it declared",
+        )
         _, served = client.fetch(image_entry)
         check(served == picture, "the original image is served untouched")
 
@@ -137,6 +144,16 @@ def main() -> int:
             check(False, "an absent representation is an error")
         except ProtocolError as error:
             check(error.code == "no-such-mime", "an absent mime answers no-such-mime")
+
+        try:
+            # Text has no thumbnail, but the entry is there.
+            client.thumb(entry)
+            check(False, "a missing thumbnail is an error")
+        except ProtocolError as error:
+            check(
+                error.code == "no-such-mime",
+                "a missing thumbnail answers no-such-mime, not no-such-entry",
+            )
 
         report = client.stats()
         check(report["entries"] >= 2, "stats counts what is held")

@@ -27,6 +27,9 @@ jobs:
           sudo apt-get install --no-install-recommends -y shellcheck
       - run: shellcheck scripts/*.sh install.sh uninstall.sh
       - run: ./scripts/check-version.sh
+      # The mime tables and the protocol constants exist in three languages;
+      # nothing but this stops them drifting apart.
+      - run: ./scripts/check-consistency.sh
 
   daemon:
     name: Daemon (${{ matrix.os }})
@@ -54,8 +57,13 @@ jobs:
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked --all-features
       - run: cargo build --release --locked --all-features
-      - name: Build without thumbnails
-        run: cargo build --release --locked --no-default-features
+      # Without the feature the daemon decodes nothing at all, and the code
+      # that is left has to stand on its own — including having no constants
+      # that only the removed half referred to.
+      - name: Check without thumbnails
+        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
+      - run: cargo test --locked --no-default-features
+      - run: cargo build --release --locked --no-default-features
 
   msrv:
     name: Minimum Rust version

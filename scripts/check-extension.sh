@@ -95,14 +95,27 @@ else
   pass "stream work in the shell process is asynchronous"
 fi
 
-echo "Orientation compatibility"
-# St.BoxLayout carried `vertical` through GNOME 46 and dropped it in 48, so a
-# literal in a constructor breaks on one shell or the other.
-if grep -rnE "vertical: (true|false)" "${EXT}/lib" "${EXT}/extension.js" 2>/dev/null | grep -q .; then
-  grep -rnE "vertical: (true|false)" "${EXT}/lib" "${EXT}/extension.js" | sed 's/^/    /'
-  fail "St.BoxLayout vertical is set literally; use compat.js"
-else
-  pass "box orientation goes through compat.js"
+echo "GObject type names"
+python3 "${ROOT}/scripts/check-gtypes.py" "${EXT}" || FAILED=1
+
+echo "Version-gated APIs"
+# Three APIs changed inside the declared shell range, and each one fails hard
+# rather than degrading: `orientation` does not exist on 46, `vertical` is
+# deprecated from 48, and `set_bytes` gained a Cogl.Context argument in 48.
+# All three go through compat.js, which is the only file allowed to name them.
+# Fixed-string matching, because two of these contain regex metacharacters.
+gated=0
+for pattern in 'orientation:' 'vertical: true' '.set_bytes('; do
+  found="$(grep -rnF -- "${pattern}" "${EXT}/lib" "${EXT}/extension.js" 2>/dev/null \
+    | grep -v '/compat.js:' || true)"
+  if [ -n "${found}" ]; then
+    printf '%s\n' "${found}" | sed 's/^/    /'
+    fail "${pattern} is used outside compat.js"
+    gated=1
+  fi
+done
+if [ "${gated}" -eq 0 ]; then
+  pass "orientation, vertical and set_bytes go through compat.js"
 fi
 
 echo "Settings keys"
