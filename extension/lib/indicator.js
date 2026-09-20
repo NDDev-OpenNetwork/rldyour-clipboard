@@ -106,6 +106,11 @@ export const Indicator = GObject.registerClass({
         this.accessible_name = connected
             ? 'Clipboard history'
             : 'Clipboard history (the archive daemon is not running)';
+        // A reconnect can mean the daemon restarted and the rows on screen
+        // no longer match the archive — repaint the open picker with what
+        // is actually there.
+        if (connected && this.menu.isOpen)
+            this._picker?.refresh();
     }
 
     /** Opens the panel, for the keyboard shortcut. */
