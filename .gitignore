@@ -1,0 +1,11 @@
+# Build output
+/daemon/target/
+/python/dist/
+/python/build/
+/python/.venv/
+/python/.pytest_cache/
+__pycache__/
+*.egg-info/
+
+# Compiled schemas; the XML source is what is checked in.
+/extension/schemas/gschemas.compiled

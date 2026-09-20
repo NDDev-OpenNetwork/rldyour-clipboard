@@ -1,0 +1,13 @@
+[Unit]
+Description=rldyour-clipboard archive socket
+
+[Socket]
+# %t is the per-user runtime directory, which is tmpfs and cleaned on logout.
+# The archive itself lives in the data directory and survives.
+ListenStream=%t/rldyour-clipboard.sock
+# The archive holds everything the user has ever copied, so the socket is the
+# whole security boundary.
+SocketMode=0600
+
+[Install]
+WantedBy=sockets.target

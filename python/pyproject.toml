@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rldyour-clipboard"
+version = "0.1.0"
+description = "Python client for the rldyour-clipboard archive daemon"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "AGPL-3.0-or-later"
+authors = [{ name = "NDDev OpenNetwork" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows :: Windows 10",
+  "Operating System :: POSIX :: Linux",
+]
+
+[project.urls]
+Homepage = "https://github.com/NDDev-OpenNetwork/rldyour-clipboard"
+Repository = "https://github.com/NDDev-OpenNetwork/rldyour-clipboard"
+Issues = "https://github.com/NDDev-OpenNetwork/rldyour-clipboard/issues"
+
+[project.scripts]
+rldyour-clipboard = "rldyour_clipboard:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rldyour_clipboard"]

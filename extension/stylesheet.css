@@ -1,0 +1,187 @@
+/* rldyour-clipboard — panel and picker styling
+ * Copyright (C) 2026 NDDev OpenNetwork
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * St implements a subset of CSS and resolves no variables, so the colours
+ * below are written out. They are taken from the shell's own palette so the
+ * picker sits in the theme rather than beside it.
+ */
+
+.rldyour-indicator-icon {
+    icon-size: 16px;
+}
+
+/* The popup is a working surface rather than a menu, so it gets a fixed
+   width: rows that reflow as their content changes are unreadable. */
+.rldyour-menu {
+    padding: 0;
+}
+
+.rldyour-picker {
+    width: 420px;
+    padding: 8px;
+    spacing: 8px;
+}
+
+/* -- search ------------------------------------------------------------- */
+
+.rldyour-search-row {
+    padding: 0 2px;
+}
+
+.rldyour-search {
+    width: 100%;
+    border-radius: 8px;
+}
+
+.rldyour-search-icon {
+    icon-size: 16px;
+    padding-right: 6px;
+}
+
+/* -- filters ------------------------------------------------------------ */
+
+.rldyour-filters {
+    spacing: 4px;
+    padding: 0 2px;
+}
+
+.rldyour-filter {
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 0.85em;
+    color: rgba(255, 255, 255, 0.7);
+    background-color: rgba(255, 255, 255, 0.07);
+}
+
+.rldyour-filter:hover {
+    background-color: rgba(255, 255, 255, 0.13);
+}
+
+.rldyour-filter:checked {
+    color: #ffffff;
+    background-color: rgba(255, 255, 255, 0.22);
+}
+
+.rldyour-filter:focus {
+    border: 1px solid rgba(255, 255, 255, 0.5);
+}
+
+/* -- the list ----------------------------------------------------------- */
+
+.rldyour-scroll {
+    /* Roughly seven rows: enough to scan, short enough to stay a popup. */
+    max-height: 380px;
+}
+
+.rldyour-list {
+    spacing: 2px;
+}
+
+.rldyour-empty {
+    padding: 28px 12px;
+    color: rgba(255, 255, 255, 0.5);
+    text-align: center;
+}
+
+.rldyour-row {
+    padding: 6px 8px;
+    border-radius: 8px;
+}
+
+.rldyour-row:hover,
+.rldyour-row:focus,
+.rldyour-row-selected {
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+.rldyour-row-box {
+    spacing: 10px;
+}
+
+.rldyour-row-text {
+    spacing: 1px;
+}
+
+.rldyour-row-title {
+    font-weight: 500;
+}
+
+.rldyour-row-detail {
+    font-size: 0.8em;
+    color: rgba(255, 255, 255, 0.55);
+}
+
+/* -- the glyph at the start of a row ------------------------------------ */
+
+.rldyour-glyph {
+    icon-size: 22px;
+    width: 44px;
+    color: rgba(255, 255, 255, 0.75);
+}
+
+/* A thumbnail keeps the same footprint as the icon it replaces, so rows do
+   not change height as images load in. */
+.rldyour-thumb {
+    icon-size: 40px;
+    width: 44px;
+    height: 40px;
+    border-radius: 4px;
+}
+
+.rldyour-swatch {
+    width: 40px;
+    height: 40px;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+/* -- per-row actions ---------------------------------------------------- */
+
+.rldyour-row-actions {
+    spacing: 2px;
+}
+
+.rldyour-action {
+    padding: 4px;
+    border-radius: 6px;
+    color: rgba(255, 255, 255, 0.45);
+}
+
+.rldyour-action:hover {
+    color: #ffffff;
+    background-color: rgba(255, 255, 255, 0.15);
+}
+
+.rldyour-action-icon {
+    icon-size: 14px;
+}
+
+.rldyour-pinned {
+    color: #f6d32d;
+}
+
+/* -- footer ------------------------------------------------------------- */
+
+.rldyour-footer {
+    padding: 4px 4px 0 4px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    spacing: 8px;
+}
+
+.rldyour-summary {
+    font-size: 0.8em;
+    color: rgba(255, 255, 255, 0.5);
+}
+
+.rldyour-clear {
+    padding: 3px 10px;
+    border-radius: 6px;
+    font-size: 0.85em;
+    color: rgba(255, 255, 255, 0.7);
+}
+
+.rldyour-clear:hover {
+    color: #ffffff;
+    background-color: rgba(255, 255, 255, 0.15);
+}

@@ -1,0 +1,53 @@
+[package]
+name = "rldyour-clipboardd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "AGPL-3.0-or-later"
+description = "Clipboard archive daemon with unbounded entry size for Linux, macOS, and Windows"
+repository = "https://github.com/NDDev-OpenNetwork/rldyour-clipboard"
+
+# Every dependency here is one the daemon cannot honestly do without.
+# `rusqlite` is bundled so the archive index needs nothing from the host;
+# `sha2` gives blobs their content addresses; `image` is the only way to make a
+# thumbnail without decoding a picture inside the compositor process, which is
+# the one thing the whole architecture exists to avoid. `serde_json` parses the
+# control frames: they carry user text, and hand-rolling string unescaping --
+# surrogate pairs included -- would be a correctness risk, not a saving.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+sha2 = "0.10"
+image = { version = "0.25", optional = true, default-features = false, features = [
+  "png", "jpeg", "gif", "bmp", "webp",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSArray", "NSData"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+uds_windows = "1.2.1"
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Memory",
+  "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader",
+] }
+
+[features]
+default = ["thumbnails"]
+# Thumbnailing is the daemon's only image-decoding work. Turning it off drops
+# the `image` crate entirely; the UI then falls back to a kind icon.
+thumbnails = ["dep:image"]
+
+# The daemon sleeps almost all of its life and wakes to copy bytes. Size and
+# residency win over throughput. `panic = "abort"` also makes a fault a clean
+# restart under the service manager rather than a half-live process holding the
+# archive's write lock.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

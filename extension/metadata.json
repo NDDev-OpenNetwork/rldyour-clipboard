@@ -1,0 +1,15 @@
+{
+  "uuid": "rldyour-clipboard@nddev-opennetwork",
+  "name": "rldyour clipboard",
+  "description": "Keeps what you copy — text, images and files, at any size — and puts it back when you pick it.\n\nA tray icon beside your other indicators opens a picker; the entry you choose is pasted into whatever you were typing in. Everything is archived by a companion daemon over a private socket, so the shell process itself stores nothing, hashes nothing and decodes no images.",
+  "shell-version": [
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "url": "https://github.com/NDDev-OpenNetwork/rldyour-clipboard",
+  "version": 1,
+  "settings-schema": "org.gnome.shell.extensions.rldyour-clipboard"
+}

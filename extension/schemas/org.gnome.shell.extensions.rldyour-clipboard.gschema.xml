@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="rldyour-clipboard">
+  <schema id="org.gnome.shell.extensions.rldyour-clipboard"
+          path="/org/gnome/shell/extensions/rldyour-clipboard/">
+
+    <key name="record" type="b">
+      <default>true</default>
+      <summary>Archive what is copied</summary>
+      <description>
+        Turning this off leaves the archive readable but stops new entries
+        being added. Nothing already archived is removed.
+      </description>
+    </key>
+
+    <key name="paste-on-select" type="b">
+      <default>true</default>
+      <summary>Paste immediately when an entry is chosen</summary>
+      <description>
+        Puts the entry on the clipboard and types the paste shortcut into the
+        window that had the keyboard. With this off, the entry is only placed
+        on the clipboard and pasting stays a deliberate act.
+      </description>
+    </key>
+
+    <key name="max-entry-megabytes" type="i">
+      <default>512</default>
+      <range min="1" max="8192"/>
+      <summary>Largest single representation to archive, in megabytes</summary>
+      <description>
+        A representation larger than this is skipped. The entry is still
+        archived if any of its other representations fit.
+      </description>
+    </key>
+
+    <key name="excluded-apps" type="as">
+      <default>[]</default>
+      <summary>Applications whose copies are never archived</summary>
+      <description>
+        Window class names, matched without regard to case. Password managers
+        are already excluded whatever this says, because they mark their
+        clipboard content as a secret.
+      </description>
+    </key>
+
+    <key name="terminal-apps" type="as">
+      <default>[]</default>
+      <summary>Applications that paste with Ctrl+Shift+V</summary>
+      <description>
+        In a terminal Ctrl+V is the literal-next-character escape rather than
+        paste. Leaving this empty uses a built-in list of the common
+        terminals; setting it replaces that list.
+      </description>
+    </key>
+
+    <key name="open-picker" type="as">
+      <default><![CDATA[['<Super>v']]]></default>
+      <summary>Shortcut that opens the picker</summary>
+    </key>
+
+  </schema>
+</schemalist>

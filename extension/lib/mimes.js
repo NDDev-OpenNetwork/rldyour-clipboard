@@ -1,0 +1,157 @@
+/* rldyour-clipboard — which representations to keep and which to serve back
+ * Copyright (C) 2026 NDDev OpenNetwork
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * Deliberately free of St, Clutter and Meta. These are the decisions worth
+ * testing — what gets archived, what gets pasted — and keeping them out of the
+ * modules that touch the compositor is what lets them be tested at all,
+ * without a running shell.
+ */
+
+/**
+ * Mime types that mean "this is a secret, do not remember it".
+ *
+ * Password managers, browsers in private mode and remote desktop clients set
+ * one of these alongside the content. An entry offering any of them is dropped
+ * before a single byte is read. The daemon refuses them too; this check exists
+ * so the bytes never leave the compositor in the first place.
+ *
+ * The names are what the ecosystem settled on rather than a standard: the KDE
+ * hint is what KeePassXC, KWallet and Klipper agree on, and the NSPasteboard
+ * type is its macOS equivalent.
+ */
+const SENSITIVE = [
+    'x-kde-passwordmanagerhint',
+    'application/x-nspasteboard-concealed-type',
+    'org.nspasteboard.concealedtype',
+    'text/x-moz-password',
+    'x-keepassxc-password',
+    'password',
+    'secret',
+];
+
+/**
+ * Selection targets that describe the selection rather than carry it.
+ *
+ * X11 clients advertise these alongside the real representations; reading one
+ * would archive a list of target names as though it were something copied.
+ */
+const PROTOCOL_TARGETS = [
+    'targets',
+    'timestamp',
+    'multiple',
+    'save_targets',
+    'delete',
+    'insert_selection',
+    'insert_property',
+    'atom',
+    'atom_pair',
+    'null',
+];
+
+/** Serving preference, lowest first. Mirrors the daemon's own ordering. */
+const RANK = {
+    'image/png': 0,
+    'image/webp': 1,
+    'image/jpeg': 2,
+    'image/gif': 3,
+    'image/bmp': 4,
+    'x-special/gnome-copied-files': 10,
+    'x-special/nautilus-clipboard': 11,
+    'text/uri-list': 12,
+    'text/html': 20,
+    'text/rtf': 21,
+    'text/plain;charset=utf-8': 30,
+    'utf8_string': 31,
+    'text/plain': 32,
+    'string': 33,
+};
+
+/**
+ * At most this many representations of one clipboard event are recorded.
+ *
+ * A source may advertise dozens of targets; past the first handful they are
+ * near-duplicates the daemon would store once anyway, and each one costs a
+ * transfer out of the compositor.
+ */
+export const MAX_REPRESENTATIONS = 8;
+
+/** Whether one advertised type marks the whole event as a secret. */
+export function isSensitive(mime) {
+    return SENSITIVE.includes(mime.trim().toLowerCase());
+}
+
+export function anySensitive(offered) {
+    return offered.some(isSensitive);
+}
+
+export function rank(mime) {
+    const lowered = mime.trim().toLowerCase();
+    const known = RANK[lowered];
+    if (known !== undefined)
+        return known;
+    if (lowered.startsWith('image/'))
+        return 5;
+    if (lowered.startsWith('text/'))
+        return 34;
+    return 100;
+}
+
+/**
+ * The representations worth archiving, in the order the daemon prefers them.
+ *
+ * Targets that describe the selection rather than carry it are dropped, and
+ * the list is capped so a source advertising dozens of near-duplicates costs a
+ * handful of transfers rather than all of them.
+ */
+export function recordable(offered) {
+    const seen = new Set();
+    const wanted = [];
+
+    for (const mime of offered) {
+        const key = mime.trim().toLowerCase();
+        if (key === '' || seen.has(key))
+            continue;
+        seen.add(key);
+        if (PROTOCOL_TARGETS.includes(key))
+            continue;
+        // A target with no slash and no known name is an X11 atom, not a media
+        // type; archiving it would record protocol noise as content.
+        if (!key.includes('/') && RANK[key] === undefined)
+            continue;
+        wanted.push(mime);
+    }
+
+    wanted.sort((a, b) => rank(a) - rank(b));
+    return wanted.slice(0, MAX_REPRESENTATIONS);
+}
+
+/**
+ * The representation to restore when the caller does not name one.
+ *
+ * Only one can be offered back — `MetaSelectionSourceMemory` carries a single
+ * mime type, and a custom multi-type source cannot be written in an extension
+ * because GJS will not implement a vfunc that takes a callback, which
+ * `read_async` does. So the choice has to fail safe.
+ *
+ * Images and file references restore as themselves; there is no ambiguity.
+ * Text restores as plain text even when the entry also holds HTML: plain text
+ * pasted into a rich editor is merely unstyled, whereas HTML offered to a
+ * terminal or a search field matches nothing and pastes nothing at all.
+ */
+export function preferredMime(entry) {
+    const mimes = entry.mimes ?? [];
+    if (mimes.length === 0)
+        return null;
+
+    if (entry.kind === 'image' || entry.kind === 'files')
+        return mimes[0];
+
+    const plain = mimes.find(mime => {
+        const lowered = mime.toLowerCase();
+        return lowered === 'text/plain' ||
+            lowered === 'text/plain;charset=utf-8' ||
+            lowered === 'utf8_string';
+    });
+    return plain ?? mimes[0];
+}

@@ -1,0 +1,42 @@
+[Unit]
+Description=rldyour-clipboard archive daemon
+Requires=rldyour-clipboardd.socket
+After=rldyour-clipboardd.socket
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/rldyour-clipboardd
+# Bytes the archive may occupy before the oldest unpinned entries are evicted.
+# Pinned entries are never evicted, so this is a budget for what the daemon
+# collects on its own rather than a cap on what the user chose to keep.
+Environment=RLDYOUR_CLIPBOARD_BUDGET=5368709120
+# One arena is enough for a process whose steady state is copying bytes
+# between a socket and a file.
+Environment=MALLOC_ARENA_MAX=1
+
+# The daemon builds with panic = "abort", so any fault is a clean exit that
+# systemd turns into a fresh process rather than one still holding the
+# archive's write lock.
+Restart=on-failure
+RestartSec=2
+
+# Only hardening a user manager can actually apply: anything that edits the
+# capability bounding set fails with 218/CAPABILITIES for an unprivileged
+# manager.
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+# ProtectHome cannot be used: the archive lives under $HOME and is the point
+# of the service. The two directories it needs are named instead, so the rest
+# of $HOME stays read-only to it.
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/rldyour-clipboard
+# Generous for a process that copies in 64 KiB buffers, tight enough that a
+# leak could never grow into the archive's own size.
+MemoryMax=256M
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Advisory drift and action rot happen without pushes too.
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: cargo fmt --check --manifest-path daemon/Cargo.toml
+      - run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y shellcheck
+      - run: shellcheck scripts/*.sh install.sh uninstall.sh
+      - run: ./scripts/check-version.sh
+
+  daemon:
+    name: Daemon (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: daemon
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            daemon/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('daemon/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      # The macOS and Windows capture backends cannot be cross-checked from a
+      # Linux workstation: the bundled SQLite needs a C toolchain for the
+      # target. These three jobs are what actually proves they compile.
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-features
+      - run: cargo build --release --locked --all-features
+      - name: Build without thumbnails
+        run: cargo build --release --locked --no-default-features
+
+  msrv:
+    name: Minimum Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install 1.85 --profile minimal
+      - run: cargo +1.85 check --locked --manifest-path daemon/Cargo.toml
+
+  extension:
+    name: GNOME extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libglib2.0-bin gjs
+      - run: ./scripts/check-extension.sh
+      - name: Check the extension's own logic
+        run: gjs -m extension/tests/smoke.js
+
+  e2e:
+    name: End to end (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - run: cargo build --release --locked --manifest-path daemon/Cargo.toml
+      - name: Record and read the archive back
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          # A short socket path: AF_UNIX addresses are capped near 108 bytes,
+          # and a runner's workspace path is longer than that on its own.
+          export XDG_RUNTIME_DIR="$(mktemp -d /tmp/rt.XXXX)"
+          export RLDYOUR_CLIPBOARD_HOME="$(mktemp -d /tmp/ar.XXXX)"
+          ./daemon/target/release/rldyour-clipboardd &
+          daemon=$!
+          python -m venv /tmp/e2e
+          /tmp/e2e/bin/pip install ./python
+          sleep 1
+          /tmp/e2e/bin/python scripts/e2e-sample.py
+          kill "${daemon}"
+
+  python-client:
+    name: Python client (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Run the test suite
+        shell: bash
+        run: |
+          python -m venv /tmp/pyclient
+          # Windows venvs use Scripts/ instead of bin/.
+          V=/tmp/pyclient/bin; [ -d /tmp/pyclient/Scripts ] && V=/tmp/pyclient/Scripts
+          "$V/pip" install pytest ./python
+          "$V/pytest" python/tests
+      - if: runner.os == 'Linux'
+        run: |
+          python -m venv /tmp/pybuild
+          /tmp/pybuild/bin/pip install build
+          /tmp/pybuild/bin/python -m build python
+
+  audit:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
+        working-directory: daemon
