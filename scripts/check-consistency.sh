@@ -75,6 +75,43 @@ for hint in sorted(js_hints - rust_hints):
 sys.exit(1)
 PY
 
+echo "Selection-filter rules"
+python3 - "${ROOT}" <<'PY' || FAILED=1
+import pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+
+rust = (root / "daemon/src/kind.rs").read_text()
+js = (root / "extension/lib/mimes.js").read_text()
+
+def block(text, marker, quote):
+    start = text.index(marker)
+    # `];` terminates the table in both languages — a plain "]" would stop at
+    # the Rust `&[&str]` type annotation instead.
+    end = text.index("];", start)
+    return {m.lower() for m in re.findall(quote + r"([^" + quote + r"]+)" + quote, text[start:end])}
+
+rust_targets = block(rust, "const PROTOCOL_TARGETS", '"')
+js_targets = block(js, "const PROTOCOL_TARGETS", "'")
+
+ok = True
+for name in sorted(rust_targets - js_targets):
+    print(f"  \033[31mFAIL\033[0m {name!r} is protocol noise to the daemon but not to the extension")
+    ok = False
+for name in sorted(js_targets - rust_targets):
+    print(f"  \033[31mFAIL\033[0m {name!r} is protocol noise to the extension but not to the daemon")
+    ok = False
+
+rust_cap = int(re.search(r'MAX_REPRESENTATIONS: usize = (\d+)', rust).group(1))
+js_cap = int(re.search(r'MAX_REPRESENTATIONS = (\d+)', js).group(1))
+if rust_cap != js_cap:
+    print(f"  \033[31mFAIL\033[0m representation cap is {rust_cap} in the daemon, {js_cap} in the extension")
+    ok = False
+
+if ok:
+    print(f"  \033[32mok\033[0m   {len(rust_targets)} protocol targets and the cap of {rust_cap} agree")
+sys.exit(0 if ok else 1)
+PY
+
 echo "Protocol version"
 rust_version="$(grep -oP 'PROTOCOL_VERSION: u32 = \K\d+' "${ROOT}/daemon/src/proto.rs")"
 js_version="$(grep -oP 'const PROTOCOL_VERSION = \K\d+' "${ROOT}/extension/lib/client.js")"

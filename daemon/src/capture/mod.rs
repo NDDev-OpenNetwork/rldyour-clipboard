@@ -4,14 +4,14 @@
 //! a tray client that had to relay every copy would be a second process in the
 //! path for no gain.
 //!
-//! Linux is different, and deliberately so. Mutter implements neither
-//! `wlr-data-control` nor `ext-data-control-v1` and its maintainers have said
-//! it will not — reading another application's clipboard is treated as
-//! something a compositor should not hand out. The only code that can see the
-//! selection under GNOME is code running inside the shell, so there the GNOME
-//! Shell extension captures and streams entries in over the socket. This
-//! module is empty on Linux for that reason, not for lack of an
-//! implementation.
+//! On Linux it depends on the display protocol. X11 selections are readable by
+//! any client, so there the daemon watches `CLIPBOARD` directly — which is
+//! also how remote copies arrive, because `xrdp-chansrv` takes X11 selection
+//! ownership whenever the RDP peer copies. Wayland is the different case:
+//! Mutter implements neither `wlr-data-control` nor `ext-data-control-v1` and
+//! its maintainers have said it will not — reading another application's
+//! clipboard is treated as something a compositor should not hand out. There
+//! the GNOME Shell extension captures and streams entries in over the socket.
 
 use crate::outbox::Watchers;
 use crate::proto::Response;
@@ -23,52 +23,78 @@ use std::sync::Arc;
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
+#[cfg(target_os = "linux")]
+mod x11;
 
 /// Starts watching the clipboard, if this platform lets the daemon do it.
 ///
 /// Returns whether a watcher was started, which is only used to say so in the
 /// log: a platform without one is the expected state, not a degraded one.
 pub fn spawn(store: Arc<Store>, watchers: Arc<Watchers>) -> bool {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        let spawned = std::thread::Builder::new()
-            .name("clipboard".into())
-            .spawn(move || {
-                let recorder = Recorder { store, watchers };
-                #[cfg(target_os = "macos")]
-                macos::watch(&recorder);
-                #[cfg(target_os = "windows")]
-                windows::watch(&recorder);
-            });
-
-        if spawned.is_err() {
-            eprintln!("rldyour-clipboardd: could not start the clipboard watcher");
-            return false;
-        }
-        return true;
+    // On Linux the X11 watcher is only worth starting when an X server is
+    // actually reachable — a Wayland-only session has no `DISPLAY`, and there
+    // the extension is the capture path by design.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_none() {
+        return false;
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        // Silences the unused bindings on Linux without a second cfg block
-        // around every parameter.
-        let _ = (store, watchers);
-        false
+    let spawned = std::thread::Builder::new()
+        .name("clipboard".into())
+        .spawn(move || {
+            let recorder = Recorder { store, watchers };
+            watch(&recorder);
+        });
+
+    if spawned.is_err() {
+        eprintln!("rldyour-clipboardd: could not start the clipboard watcher");
+        return false;
     }
+    true
 }
+
+/// The backend the platform provides.
+///
+/// On a GNOME X11 session the shell extension watches the same selection;
+/// a copy seen by both is one event to the archive, which the store's
+/// content deduplication absorbs.
+#[cfg(target_os = "linux")]
+fn watch(recorder: &Recorder) {
+    x11::watch(recorder);
+}
+
+#[cfg(target_os = "macos")]
+fn watch(recorder: &Recorder) {
+    macos::watch(recorder);
+}
+
+#[cfg(target_os = "windows")]
+fn watch(recorder: &Recorder) {
+    windows::watch(recorder);
+}
+
+/// Platforms with no display protocol the daemon can read directly.
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn watch(_: &Recorder) {}
 
 /// What a platform watcher hands one clipboard event to.
 ///
 /// Keeping the archive behind this means a backend deals only in
 /// `(mime, bytes)` pairs and never learns how entries are stored, hashed or
 /// announced.
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows")),
+    allow(dead_code)
+)]
 pub struct Recorder {
     store: Arc<Store>,
     watchers: Arc<Watchers>,
 }
 
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows")),
+    allow(dead_code)
+)]
 impl Recorder {
     /// Archives one clipboard event holding every representation given.
     ///

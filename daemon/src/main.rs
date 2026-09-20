@@ -110,13 +110,19 @@ fn run() -> std::io::Result<()> {
     let (listener, socket_activated) = bind()?;
     let watchers = Arc::new(Watchers::default());
 
-    // Where the daemon can see the clipboard itself, it does. On Linux it
-    // cannot, and the GNOME Shell extension feeds it over the socket instead.
-    if capture::spawn(Arc::clone(&store), Arc::clone(&watchers)) {
+    // Where the daemon can see the clipboard itself, it does: natively on
+    // macOS and Windows, and on Linux whenever an X11 server is reachable —
+    // which is every XRDP session too. A GNOME Wayland session is the one
+    // place no client may read the selection, so there the shell extension
+    // feeds the daemon over the socket instead.
+    let capturing = capture::spawn(Arc::clone(&store), Arc::clone(&watchers));
+    if capturing {
         eprintln!("rldyour-clipboardd: watching the clipboard natively");
     }
 
-    if socket_activated {
+    // The idle exit frees a daemon nobody uses; one that is itself watching
+    // the clipboard is in continuous use, so it stays resident.
+    if socket_activated && !capturing {
         // Only a manager-owned socket may be left unattended: it is what
         // starts the daemon again on the next connection.
         idle_watch();

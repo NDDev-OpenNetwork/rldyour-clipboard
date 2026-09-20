@@ -75,6 +75,67 @@ pub fn any_sensitive<'a>(mimes: impl IntoIterator<Item = &'a str>) -> bool {
     mimes.into_iter().any(is_sensitive)
 }
 
+/// Selection targets that describe the selection rather than carry it.
+///
+/// X11 clients advertise these alongside the real representations; reading
+/// one would archive a list of target names as though it were something
+/// copied. The daemon-side X11 watcher needs the same list the extension's
+/// `mimes.js` carries; `scripts/check-consistency.sh` compares them.
+const PROTOCOL_TARGETS: &[&str] = &[
+    "targets",
+    "timestamp",
+    "multiple",
+    "save_targets",
+    "delete",
+    "insert_selection",
+    "insert_property",
+    "atom",
+    "atom_pair",
+    "null",
+];
+
+/// At most this many representations of one clipboard event are recorded.
+///
+/// A source may advertise dozens of targets; past the first handful they are
+/// near-duplicates the archive stores once anyway, and each one costs a
+/// transfer. Must agree with `MAX_REPRESENTATIONS` in `mimes.js`.
+pub const MAX_REPRESENTATIONS: usize = 8;
+
+/// The representations worth archiving from an offered target list, in the
+/// order they should be recorded.
+///
+/// Mirrors `recordable()` in the extension's `mimes.js`: protocol noise and
+/// unknown bare atoms are dropped, what remains is ranked and capped. The two
+/// have to agree or the same copy would archive differently depending on
+/// which watcher saw it.
+pub fn recordable(offered: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut wanted: Vec<String> = Vec::new();
+
+    for mime in offered {
+        let key = lower(mime);
+        if key.is_empty() || !seen.insert(key.clone()) {
+            continue;
+        }
+        if PROTOCOL_TARGETS.contains(&key.as_str()) {
+            continue;
+        }
+        // A target with no slash and no known name is an X11 atom, not a
+        // media type; archiving it would record protocol noise as content.
+        if !key.contains('/') && !RANKED_BARE.contains(&key.as_str()) {
+            continue;
+        }
+        wanted.push(mime.trim().to_string());
+    }
+
+    wanted.sort_by_key(|mime| rank(mime));
+    wanted.truncate(MAX_REPRESENTATIONS);
+    wanted
+}
+
+/// The bare X11 atoms the rank table knows, for `recordable`'s slash test.
+const RANKED_BARE: &[&str] = &["utf8_string", "string", "text"];
+
 /// Serving preference, lowest first.
 ///
 /// This decides only which representation a `fetch` without a mime returns.
@@ -233,6 +294,55 @@ mod tests {
         assert!(!is_sensitive("text/plain"));
         assert!(any_sensitive(["text/plain", "x-kde-passwordManagerHint"]));
         assert!(!any_sensitive(["text/plain", "text/html"]));
+    }
+
+    #[test]
+    fn recordable_drops_protocol_noise_and_keeps_the_rdp_surface() {
+        // What xrdp-chansrv advertises for a remote text copy.
+        let offered: Vec<String> = [
+            "TIMESTAMP",
+            "TARGETS",
+            "MULTIPLE",
+            "SAVE_TARGETS",
+            "UTF8_STRING",
+            "STRING",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            recordable(&offered),
+            vec!["UTF8_STRING".to_string(), "STRING".to_string()]
+        );
+
+        // A remote image copy offers BMP; a remote file copy offers the
+        // uri-list. An unknown mime with a slash is still content — kept last.
+        let offered: Vec<String> = ["text/uri-list", "application/x-weird", "image/bmp"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            recordable(&offered),
+            vec![
+                "image/bmp".to_string(),
+                "text/uri-list".to_string(),
+                "application/x-weird".to_string(),
+            ]
+        );
+
+        // An atom with no slash and no known name is noise, not content.
+        let offered: Vec<String> = ["clipboard_manager", "text/plain"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(recordable(&offered), vec!["text/plain".to_string()]);
+
+        // Duplicates collapse; the cap bounds a source that offers hundreds.
+        let offered: Vec<String> = std::iter::repeat_with(|| "text/plain".to_string())
+            .take(3)
+            .chain((0..20).map(|i| format!("text/x-pad-{i}")))
+            .collect();
+        assert_eq!(recordable(&offered).len(), MAX_REPRESENTATIONS);
     }
 
     #[test]
