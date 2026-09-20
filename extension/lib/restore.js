@@ -4,10 +4,14 @@
  */
 
 import Clutter from 'gi://Clutter';
+import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 
 import {preferredMime} from './mimes.js';
+
+Gio._promisify(Gio.OutputStream.prototype, 'write_bytes_async', 'write_bytes_finish');
+Gio._promisify(Gio.Subprocess.prototype, 'wait_check_async', 'wait_check_finish');
 
 /**
  * Applications whose paste shortcut is Ctrl+Shift+V rather than Ctrl+V.
@@ -54,6 +58,18 @@ const FOCUS_SETTLE_MILLISECONDS = 60;
  * refuses to implement a vfunc that takes a callback — `read_async` is exactly
  * that.
  *
+ * ## X11 needs a real client
+ *
+ * A memory source answers `read_async` with a strict single-mime comparison,
+ * so on X11 only clients that negotiate through TARGETS get served — an
+ * application asking blindly for `UTF8_STRING` or `STRING`, which is most of
+ * them, is refused and pastes nothing. On X11 the restore therefore goes
+ * through `xclip`, a real X11 client that owns CLIPBOARD and answers any
+ * target — the same thing every X11 clipboard manager does. Without xclip
+ * the memory source is the fallback: ownership still transfers, but only the
+ * one mime is offered. Wayland clients request from the offered list, so the
+ * memory source is sufficient there.
+ *
  * So the representation is chosen, and chosen to fail safe. Text is restored
  * as `text/plain` even when the entry also holds `text/html`: plain text
  * pasted into a rich editor is merely unstyled, whereas HTML offered to a
@@ -73,6 +89,7 @@ export class Restore {
         this._capture = capture;
         this._settings = settings;
         this._pasteId = 0;
+        this._cancellable = new Gio.Cancellable();
     }
 
     /**
@@ -86,8 +103,17 @@ export class Restore {
     async activate(entry, {mime = null, paste = true} = {}) {
         const wanted = mime ?? preferredMime(entry);
         const {mime: served, bytes} = await this._client.fetch(entry.id, wanted);
+        await this._putOnClipboard(served, bytes);
 
-        const source = Meta.SelectionSourceMemory.new(served, bytes);
+        if (paste && this._settings.get_boolean('paste-on-select'))
+            this._paste();
+    }
+
+    async _putOnClipboard(mime, bytes) {
+        if (!Meta.is_wayland_compositor() && await this._xclip(mime, bytes))
+            return;
+
+        const source = Meta.SelectionSourceMemory.new(mime, bytes);
 
         // Told before the owner changes, because `set_owner` raises
         // `owner-changed` synchronously and the capture must recognise this
@@ -95,9 +121,47 @@ export class Restore {
         this._capture?.setOurs(source);
         global.display.get_selection().set_owner(
             Meta.SelectionType.SELECTION_CLIPBOARD, source);
+    }
 
-        if (paste && this._settings.get_boolean('paste-on-select'))
-            this._paste();
+    /**
+     * Hands the bytes to `xclip`, which then owns CLIPBOARD as a real X11
+     * client and serves them for any target a paster asks for.
+     *
+     * `-in` reads stdin until it closes, then forks and keeps the selection
+     * until another owner takes it — the same lifetime a copy would have.
+     * `-t` is what TARGETS advertises; requesters that consult it ask for
+     * exactly this mime, and the ones that do not are served anyway.
+     *
+     * @returns {Promise<boolean>} whether the helper took the clipboard
+     */
+    async _xclip(mime, bytes) {
+        const program = GLib.find_program_in_path('xclip');
+        if (!program)
+            return false;
+
+        let proc = null;
+        try {
+            proc = Gio.Subprocess.new(
+                [program, '-selection', 'clipboard', '-in', '-t', mime],
+                Gio.SubprocessFlags.STDIN_PIPE);
+
+            // The ownership change arrives as a foreign source, so the bytes
+            // themselves are what capture will recognise as its own.
+            this._capture?.expectOurs(bytes);
+
+            const stdin = proc.get_stdin_pipe();
+            await stdin.write_bytes_async(
+                bytes, GLib.PRIORITY_DEFAULT, this._cancellable);
+            stdin.close(null);
+            await proc.wait_check_async(this._cancellable);
+            return true;
+        } catch (error) {
+            this._capture?.expectOurs(null);
+            if (!error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                console.debug(`rldyour-clipboard: xclip restore failed: ${error}`);
+            proc?.force_exit();
+            return false;
+        }
     }
 
     /**
@@ -136,6 +200,7 @@ export class Restore {
         if (this._pasteId)
             GLib.Source.remove(this._pasteId);
         this._pasteId = 0;
+        this._cancellable.cancel();
     }
 }
 

@@ -94,7 +94,12 @@ export default class ClipboardExtension extends Extension {
         // instead of twice, and without a race in between.
         this._restore.activate(entry, {paste})
             .catch(error => {
-                console.debug(`rldyour-clipboard: could not restore entry ${entry.id}: ${error}`);
+                // A restore the user asked for and did not get must be loud:
+                // console.debug is filtered out of the journal by default,
+                // which is how this failure used to look like a dead click.
+                console.error(`rldyour-clipboard: could not restore entry ${entry.id}: ${error}`);
+                Main.notifyError('Clipboard archive',
+                    `Could not restore the entry: ${error.message ?? error}`);
             });
     }
 }

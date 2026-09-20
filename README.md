@@ -97,6 +97,9 @@ preferences.
 ## Install on Linux
 
 Requires Rust 1.85 or newer and GNOME Shell 46 (Ubuntu 24.04 LTS) through 50.
+On X11, `xclip` is recommended: restoring an entry through it offers the bytes
+for every paste target an application might request, where the compositor's
+own memory source can offer only one.
 
 ```sh
 ./install.sh

@@ -8,6 +8,7 @@ import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 
 Gio._promisify(Meta.Selection.prototype, 'transfer_async', 'transfer_finish');
+Gio._promisify(Gio.InputStream.prototype, 'read_bytes_async', 'read_bytes_finish');
 
 import {anySensitive, recordable} from './mimes.js';
 
@@ -43,6 +44,15 @@ export class Capture {
 
         /** Set while this extension is writing the clipboard itself. */
         this._ours = null;
+        /**
+         * Digest of the bytes a helper just put on the clipboard. Unlike
+         * `setOurs`, which matches a source by identity, this recognises a
+         * restore that arrives through a foreign owner — an xclip-owned X11
+         * selection raises `owner-changed` with no `MetaSelectionSource` to
+         * compare. One-shot: consumed by the first representation staged
+         * after it is set.
+         */
+        this._expectOurs = null;
         /** Serialises events so two quick copies cannot interleave. */
         this._queue = Promise.resolve();
         this._staged = 0;
@@ -61,6 +71,20 @@ export class Capture {
      */
     setOurs(source) {
         this._ours = source;
+    }
+
+    /**
+     * Remembers the bytes a restore helper is about to own the clipboard
+     * with, so the ownership change it causes is not archived as a copy.
+     *
+     * @param {GLib.Bytes|null} bytes the restored bytes, or null to cancel
+     */
+    expectOurs(bytes) {
+        this._expectOurs = bytes === null ? null : {
+            size: bytes.get_size(),
+            sha256: GLib.compute_checksum_for_bytes(
+                GLib.ChecksumType.SHA256, bytes),
+        };
     }
 
     _onOwnerChanged(type, source) {
@@ -114,7 +138,14 @@ export class Capture {
         let recorded = 0;
         try {
             for (const mime of wanted) {
-                if (await this._recordOne(draft, type, mime))
+                const outcome = await this._recordOne(draft, type, mime);
+                if (outcome === 'ours') {
+                    // Our own helper's ownership arriving as a foreign
+                    // source: recording it would duplicate the restore.
+                    await this._client.abort(draft).catch(() => {});
+                    return;
+                }
+                if (outcome)
                     recorded += 1;
             }
         } catch (error) {
@@ -136,7 +167,8 @@ export class Capture {
      * advertises a target it cannot actually produce is common, and it must
      * not cost the entry its other representations.
      *
-     * @returns {Promise<boolean>} whether it was recorded
+     * @returns {Promise<boolean|string>} whether it was recorded, or 'ours'
+     * when the representation is the restore helper's own bytes
      */
     async _recordOne(draft, type, mime) {
         const staging = this._stagingFile();
@@ -155,6 +187,8 @@ export class Capture {
                     Gio.FileQueryInfoFlags.NONE, this._cancellable).get_size();
                 if (size === 0)
                     return false;
+                if (this._expectOurs && await this._consumeOurs(staging, size))
+                    return 'ours';
                 if (size > this._maximumBytes()) {
                     console.debug(
                         `rldyour-clipboard: skipping ${mime}, ${size} bytes is over the limit`);
@@ -191,6 +225,20 @@ export class Capture {
         }
     }
 
+    /**
+     * Compares a staged representation against the expected restore bytes.
+     *
+     * The expectation is consumed here — first call wins or clears it — so a
+     * real copy that arrives next is never mistaken for the helper's.
+     */
+    async _consumeOurs(staging, size) {
+        const expected = this._expectOurs;
+        this._expectOurs = null;
+        if (expected.size !== size)
+            return false;
+        return expected.sha256 === await fileDigest(staging, this._cancellable);
+    }
+
     _stagingFile() {
         const name = `rldyour-clipboard-stage-${Gio.Application.get_default()?.application_id ?? 'shell'}-${this._staged++}`;
         return Gio.File.new_for_path(
@@ -208,7 +256,26 @@ export class Capture {
         this._ownerChangedId = 0;
         this._cancellable.cancel();
         this._ours = null;
+        this._expectOurs = null;
     }
+}
+
+/** SHA-256 of a file, streamed so its size never enters memory. */
+async function fileDigest(file, cancellable) {
+    const stream = file.read(cancellable);
+    const checksum = new GLib.Checksum(GLib.ChecksumType.SHA256);
+    try {
+        for (;;) {
+            const chunk = await stream.read_bytes_async(
+                64 * 1024, GLib.PRIORITY_DEFAULT, cancellable);
+            if (chunk.get_size() === 0)
+                break;
+            checksum.update(chunk.get_data());
+        }
+    } finally {
+        stream.close(null);
+    }
+    return checksum.get_string();
 }
 
 /** The application the clipboard most likely came from, as a hint for the UI. */
