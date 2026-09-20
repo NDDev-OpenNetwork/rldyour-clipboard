@@ -72,6 +72,11 @@ export const Indicator = GObject.registerClass({
     }
 
     _onOpenStateChanged(open) {
+        // Destroying the button closes the menu, which emits this signal one
+        // last time — after _picker may already be gone.
+        if (!this._picker)
+            return;
+
         if (!open) {
             this._picker.reset();
             return;
