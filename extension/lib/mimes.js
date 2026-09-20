@@ -49,11 +49,20 @@ const PROTOCOL_TARGETS = [
     'null',
 ];
 
-/** Serving preference, lowest first. Mirrors the daemon's own ordering. */
+/**
+ * Serving preference, lowest first.
+ *
+ * This table and the one in the daemon's `kind.rs` must agree: the extension
+ * decides which representations to send and in what order, and the daemon
+ * decides which one a `fetch` without a mime returns. If they disagreed, an
+ * entry would be archived richest-first and served back by a different rule.
+ * `scripts/check-consistency.sh` compares them.
+ */
 const RANK = {
     'image/png': 0,
     'image/webp': 1,
     'image/jpeg': 2,
+    'image/jpg': 2,
     'image/gif': 3,
     'image/bmp': 4,
     'x-special/gnome-copied-files': 10,
@@ -61,10 +70,12 @@ const RANK = {
     'text/uri-list': 12,
     'text/html': 20,
     'text/rtf': 21,
+    'application/rtf': 21,
     'text/plain;charset=utf-8': 30,
     'utf8_string': 31,
     'text/plain': 32,
     'string': 33,
+    'text': 33,
 };
 
 /**

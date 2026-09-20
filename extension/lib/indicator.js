@@ -28,9 +28,15 @@ import {Picker} from './picker.js';
  * the choice.
  */
 export const Indicator = GObject.registerClass({
+    // Named explicitly. Left to GJS the GType would be derived from the file
+    // path and the class name -- `Gjs_lib_indicator_Indicator` -- which every
+    // other extension with a `lib/indicator.js` exporting an `Indicator` also
+    // claims. The second one to load then fails outright with "already
+    // registered", losing the whole extension rather than one widget.
+    GTypeName: 'RldyourClipboardIndicator',
     Signals: {
-        /** A row was chosen: `(entry id, paste)`. */
-        'activated': {param_types: [GObject.TYPE_INT64, GObject.TYPE_BOOLEAN]},
+        /** A row was chosen: `(entry summary, paste)`. */
+        'activated': {param_types: [GObject.TYPE_JSOBJECT, GObject.TYPE_BOOLEAN]},
     },
 }, class Indicator extends PanelMenu.Button {
     _init(client, settings) {
@@ -46,11 +52,11 @@ export const Indicator = GObject.registerClass({
         this.add_child(this._icon);
 
         this._picker = new Picker(client);
-        this._picker.connect('activated', (_picker, id, paste) => {
+        this._picker.connect('activated', (_picker, entry, paste) => {
             // Closing first is what hands the keyboard back to the window the
             // user was typing in; the paste is typed once it has landed.
             this.menu.close(true);
-            this.emit('activated', id, paste);
+            this.emit('activated', entry, paste);
         });
         this._picker.connect('dismissed', () => this.menu.close(true));
 

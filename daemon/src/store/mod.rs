@@ -310,7 +310,12 @@ impl Store {
         Ok(Some((mime, self.blobs.open_read(&digest)?, bytes)))
     }
 
-    pub fn open_thumb(&self, entry: i64) -> Result<Option<(std::fs::File, u64)>> {
+    /// The thumbnail for an entry, decoded into pixels ready to upload.
+    ///
+    /// Stored as PNG and served as RGBA: a few kilobytes is the right thing to
+    /// keep on disk, and pixels are the only thing the shell can draw without
+    /// decoding something itself.
+    pub fn thumbnail(&self, entry: i64) -> Result<Option<thumb::Pixels>> {
         let located = {
             let index = self.index.lock().expect("index lock");
             index.thumb(entry)?
@@ -318,7 +323,15 @@ impl Store {
         let Some((digest, bytes)) = located else {
             return Ok(None);
         };
-        Ok(Some((self.blobs.open_read(&digest)?, bytes)))
+
+        let mut png = Vec::with_capacity(bytes as usize);
+        self.blobs
+            .open_read(&digest)?
+            .take(bytes)
+            .read_to_end(&mut png)?;
+        // A thumbnail that will not decode is one the UI draws a kind icon
+        // for; it is not worth failing the request over.
+        Ok(thumb::decode(&png))
     }
 
     pub fn set_pinned(&self, entry: i64, pinned: bool) -> Result<Option<Summary>> {

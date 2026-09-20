@@ -133,6 +133,12 @@ single count is cheaper than a frame per chunk.
 {"ev":"commit","req":3,"entry":42,"created":true}
 ```
 
+A draft that held nothing, or that the daemon refused because a
+representation marked it a secret, commits to `"entry":0` with
+`"created":false`. The transaction finished; there is simply no entry to show
+for it. A client should treat entry `0` as "not archived" rather than as an
+id.
+
 On commit the daemon derives the entry's identity from the sorted set of
 `(mime, content hash)` pairs. If an identical entry already exists, nothing is
 written: the existing entry's timestamp moves to now, `created` is `false`, and
@@ -191,15 +197,27 @@ truth: `mimes` is what actually decides what can be served.
 ```
 
 Omitting `mime` serves the entry's preferred representation and names it in the
-answer. A thumbnail is fetched the same way and is always a PNG:
+answer.
+
+A thumbnail has its own answer, because it is pixels rather than a file:
 
 ```json
 {"op":"thumb","req":7,"entry":42}
-{"ev":"blob","req":7,"mime":"image/png","bytes":4096}
+{"ev":"thumb","req":7,"width":256,"height":128,"stride":1024,"bytes":131072}
+<131072 raw bytes>
 ```
 
+The payload is straight RGBA, eight bits a channel, `height` rows of `stride`
+bytes with no padding — the form a compositor uploads directly. The daemon
+stores thumbnails compressed and decodes them per request, which keeps the
+archive small while leaving a client with nothing to decode. That matters
+because the client may be running inside a compositor, where decoding forty
+list rows would be forty stalls of the whole desktop.
+
 Thumbnails exist only for entries whose summary says `"thumb":true`. Asking for
-one that does not exist is an `error`, not an empty payload.
+one that does not exist is an `error`, not an empty payload: `no-such-mime`
+when the entry is there but has no thumbnail, `no-such-entry` when it is gone.
+A `fetch` for a representation an entry does not hold answers the same way.
 
 ## Managing the archive
 

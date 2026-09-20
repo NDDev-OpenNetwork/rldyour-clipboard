@@ -49,8 +49,8 @@ export default class ClipboardExtension extends Extension {
         this._restore = new Restore(this._client, this._capture, this._settings);
 
         this._indicator = new Indicator(this._client, this._settings);
-        this._indicator.connect('activated', (_indicator, id, paste) =>
-            this._onActivated(id, paste));
+        this._indicator.connect('activated', (_indicator, entry, paste) =>
+            this._onActivated(entry, paste));
         Main.panel.addToStatusArea(this.uuid, this._indicator, PANEL_POSITION, PANEL_BOX);
 
         Main.wm.addKeybinding(
@@ -87,17 +87,14 @@ export default class ClipboardExtension extends Extension {
         this._indicator?.onArchiveEvent(event);
     }
 
-    _onActivated(id, paste) {
-        // The picker hands over an id rather than a summary, because by the
-        // time the panel closes the entry may have been evicted under it.
-        this._client.list({limit: 1, before: id + 1})
-            .then(([entry]) => {
-                if (entry?.id !== id)
-                    return;
-                return this._restore.activate(entry, {paste});
-            })
+    _onActivated(entry, paste) {
+        // The entry may have been evicted between the picker drawing it and
+        // the click landing. Nothing is checked for that here: the fetch
+        // answers `no-such-entry` if so, which is the same question asked once
+        // instead of twice, and without a race in between.
+        this._restore.activate(entry, {paste})
             .catch(error => {
-                console.debug(`rldyour-clipboard: could not restore entry ${id}: ${error}`);
+                console.debug(`rldyour-clipboard: could not restore entry ${entry.id}: ${error}`);
             });
     }
 }

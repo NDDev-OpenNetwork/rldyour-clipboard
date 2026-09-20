@@ -64,6 +64,14 @@ screenshot archives the PNG. Entries are classified for display as text, link,
 colour, image or files, but that is a presentation hint — the mime types are
 what decide what can be served back.
 
+**Thumbnails cost the desktop nothing.** The daemon makes one when it archives
+a picture, stores it compressed, and serves it back as ready-to-upload pixels.
+So opening a list of forty images uploads forty small buffers and decodes
+nothing — where decoding them in the shell would be forty stalls of every
+animation on screen. It is also the only thing that works: the shell's texture
+cache renders raw data from an `St.ImageContent` and from nothing else, and
+quietly draws an empty icon for anything it cannot look up in an icon theme.
+
 **Video, honestly.** No clipboard carries video bytes; copying a video file
 puts a *reference* on the clipboard — `text/uri-list` or
 `x-special/gnome-copied-files`. Those are archived and pasted back faithfully,
@@ -206,6 +214,7 @@ rldyour-clipboard get 42 > screenshot.png
 
 ```sh
 ./scripts/check-extension.sh                  # what CI runs for the extension
+./scripts/check-consistency.sh                # the facts that exist twice
 gjs -m extension/tests/smoke.js               # the extension's own logic
 cd daemon && cargo test && cargo clippy --all-targets --all-features -- -D warnings
 ./scripts/e2e-sample.py                       # against a running daemon
@@ -215,10 +224,17 @@ cd daemon && cargo test && cargo clippy --all-targets --all-features -- -D warni
 actually reads, process isolation between the shell and preferences processes,
 deprecated modules, style classes without rules — and two rules specific to
 this extension: that no synchronous stream call reaches the shell process, and
-that box orientation goes through the compatibility shim rather than a literal
-that breaks on half the supported shells. None of it needs a running shell,
-which matters because Wayland gives no way to reload extension code without a
-new login.
+that the three APIs which changed between GNOME 46 and 50 (`orientation`,
+`vertical`, `set_bytes`) are named only inside the compatibility shim. Each of
+those three throws rather than degrading, so getting one wrong costs a session
+rather than a layout. None of it needs a running shell, which matters because
+Wayland gives no way to reload extension code without a new login.
+
+`check-consistency.sh` compares the things that genuinely have to exist twice:
+the mime preference table and the password-manager hints, which the extension
+uses to decide what to capture and the daemon uses to decide what to serve
+back; and the protocol version, socket name and frame limit, which are written
+out in Rust, JavaScript, Python and a systemd unit.
 
 The macOS and Windows capture backends cannot be compiled from a Linux
 workstation — the bundled SQLite needs a C toolchain for the target — so CI on

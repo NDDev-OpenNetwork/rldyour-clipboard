@@ -10,6 +10,7 @@
 ///
 /// A list row draws at roughly ninety logical pixels; this covers that at a
 /// 2x scale factor with room to spare, and still encodes to a few kilobytes.
+#[cfg(feature = "thumbnails")]
 pub const EDGE: u32 = 256;
 
 /// Refuse to decode an image with more pixels than this.
@@ -100,6 +101,45 @@ pub fn make(_content: &[u8]) -> Thumbnail {
     Thumbnail::default()
 }
 
+/// A thumbnail as the pixels a compositor can upload directly.
+pub struct Pixels {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Pixels {
+    /// Bytes per row. Always tight: the decoder produces no padding.
+    pub fn stride(&self) -> u32 {
+        self.width * 4
+    }
+}
+
+/// Decodes a stored thumbnail into straight RGBA.
+///
+/// Thumbnails are stored as PNG because a few kilobytes is the right thing to
+/// keep on disk, and served as pixels because the only way a GNOME Shell
+/// extension can draw arbitrary image data is `St.ImageContent.set_bytes`,
+/// which wants exactly this. Doing the decode here rather than there is the
+/// same rule as everywhere else: a picker opening forty rows must not run
+/// forty decodes on the compositor's thread.
+#[cfg(feature = "thumbnails")]
+pub fn decode(png: &[u8]) -> Option<Pixels> {
+    let decoded = image::load_from_memory(png).ok()?;
+    let rgba = decoded.to_rgba8();
+    let (width, height) = (rgba.width(), rgba.height());
+    Some(Pixels {
+        rgba: rgba.into_raw(),
+        width,
+        height,
+    })
+}
+
+#[cfg(not(feature = "thumbnails"))]
+pub fn decode(_png: &[u8]) -> Option<Pixels> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +187,18 @@ mod tests {
             .into_dimensions()
             .unwrap();
         assert_eq!((width, height), (32, 16), "never blown up");
+    }
+
+    #[test]
+    #[cfg(feature = "thumbnails")]
+    fn a_thumbnail_decodes_back_to_tightly_packed_pixels() {
+        let made = make(&png(64, 32)).png.unwrap();
+        let pixels = decode(&made).unwrap();
+
+        assert_eq!((pixels.width, pixels.height), (64, 32));
+        assert_eq!(pixels.stride(), 64 * 4);
+        // Four bytes a pixel, no row padding: what set_bytes is told to read.
+        assert_eq!(pixels.rgba.len(), 64 * 32 * 4);
     }
 
     #[test]

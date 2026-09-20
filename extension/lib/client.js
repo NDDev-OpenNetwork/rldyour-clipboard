@@ -18,9 +18,19 @@ const RECONNECT_MIN_SECONDS = 1;
 const RECONNECT_MAX_SECONDS = 30;
 
 Gio._promisify(Gio.SocketClient.prototype, 'connect_async');
-Gio._promisify(Gio.DataInputStream.prototype, 'read_line_async', 'read_line_finish_utf8');
 Gio._promisify(Gio.InputStream.prototype, 'read_bytes_async');
 Gio._promisify(Gio.OutputStream.prototype, 'write_bytes_async');
+
+// `read_line_async` has two finish functions — one returning bytes and one
+// returning a string — and `Gio._promisify` is a no-op once something else has
+// already wrapped the method. Whichever variant another extension or the shell
+// itself asked for first is therefore the one this code gets, so it asks for
+// the byte form and decodes explicitly. Relying on the string form appeared to
+// work only because `JSON.parse` calls `toString()` on a Uint8Array, which GJS
+// warns about and has said it will stop honouring.
+Gio._promisify(Gio.DataInputStream.prototype, 'read_line_async', 'read_line_finish');
+
+const DECODER = new TextDecoder();
 
 /**
  * Speaks the daemon's protocol from inside the shell process.
@@ -104,10 +114,10 @@ export class Client {
                 return;
             }
 
-            // A blob's payload follows its frame immediately and belongs to
-            // the request that asked for it.
+            // A payload follows its frame immediately and belongs to the
+            // request that asked for it.
             let payload = null;
-            if (frame.ev === 'blob')
+            if (frame.ev === 'blob' || frame.ev === 'thumb')
                 payload = await this._readPayload(frame.bytes);
 
             if (frame.req === undefined) {
@@ -136,8 +146,13 @@ export class Client {
         if (line.length > MAX_FRAME)
             throw new Error('the peer sent a control frame longer than the protocol defines');
 
+        // Bytes or a string, depending on which finish function won the
+        // promisify race described above. Both are handled rather than
+        // assumed.
+        const text = typeof line === 'string' ? line : DECODER.decode(line);
+
         try {
-            return JSON.parse(line);
+            return JSON.parse(text);
         } catch {
             throw new Error('the peer sent something that is not a control frame');
         }
@@ -220,9 +235,21 @@ export class Client {
         return {mime: frame.mime, bytes: payload};
     }
 
+    /**
+     * Returns a thumbnail as `{width, height, stride, bytes}`.
+     *
+     * `bytes` is straight RGBA the daemon has already decoded, which is what
+     * `St.ImageContent.set_bytes` wants and is the only image data a shell
+     * extension can draw without decoding something itself.
+     */
     async thumb(entry) {
-        const {payload} = await this._request('thumb', {entry});
-        return payload;
+        const {frame, payload} = await this._request('thumb', {entry});
+        return {
+            width: frame.width,
+            height: frame.height,
+            stride: frame.stride,
+            bytes: payload,
+        };
     }
 
     pin(entry, pinned) {
@@ -273,7 +300,12 @@ export class Client {
         try {
             // No `bytes`: the daemon reads chunks until a zero-length one.
             await this._write({op: 'part', req, draft, mime});
+        } catch (error) {
+            this._pending.delete(req);
+            throw error;
+        }
 
+        try {
             for (;;) {
                 const chunk = await stream.read_bytes_async(
                     CHUNK, GLib.PRIORITY_DEFAULT, this._cancellable);
@@ -282,12 +314,19 @@ export class Client {
                     break;
                 await this._write({op: 'chunk', bytes: size}, chunk);
             }
-            await this._write({op: 'chunk', bytes: 0});
         } catch (error) {
             this._pending.delete(req);
-            throw error;
+            // The daemon is reading chunks, and every frame after this part is
+            // on the far side of the terminator. Leaving it out would strand
+            // the connection, so it is sent even though the part is now short.
+            await this._write({op: 'chunk', bytes: 0}).catch(() => {});
+            // Rethrown so the caller aborts the draft: what reached the daemon
+            // is a truncated representation, and committing it would archive a
+            // half a picture as though it were whole.
+            throw new TruncatedPart(mime, error);
         }
 
+        await this._write({op: 'chunk', bytes: 0});
         return answer;
     }
 
@@ -336,6 +375,21 @@ export class Client {
 
         this._cancellable.cancel();
         this._teardown();
+    }
+}
+
+/**
+ * A representation that was only partly sent.
+ *
+ * Distinct from any other failure because of what it means for the draft: the
+ * daemon holds a short copy of this representation, so the entry must be
+ * abandoned rather than committed.
+ */
+export class TruncatedPart extends Error {
+    constructor(mime, cause) {
+        super(`the ${mime} representation was cut off: ${cause}`);
+        this.mime = mime;
+        this.cause = cause;
     }
 }
 

@@ -11,11 +11,12 @@ import json
 import socket
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
-from rldyour_clipboard import Client, ProtocolError
+from rldyour_clipboard import Client, ProtocolError, TruncatedPart
 
 
 class StubDaemon:
@@ -54,6 +55,22 @@ class StubDaemon:
         finally:
             connection.close()
 
+    def wait_for(self, count: int, timeout: float = 2.0) -> None:
+        """Block until the stub has parsed ``count`` frames.
+
+        The stub reads on its own thread, so a test that inspects ``received``
+        immediately after a call is racing it. Waiting on a deadline makes the
+        assertions about what was sent deterministic instead of lucky.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if len(self.received) >= count:
+                return
+            time.sleep(0.005)
+        raise AssertionError(
+            f"the stub saw {len(self.received)} frames, expected {count}"
+        )
+
     def close(self) -> None:
         self._server.close()
         self.directory.cleanup()
@@ -78,6 +95,7 @@ def test_greets_with_the_protocol_version_and_role():
     try:
         with Client(path=stub.path, role="capture") as client:
             assert client.hello["v"] == 1
+        stub.wait_for(1)
         assert stub.received[0] == {"op": "hello", "v": 1, "role": "capture"}
     finally:
         stub.close()
@@ -124,6 +142,27 @@ def test_a_blob_payload_is_read_to_its_declared_length():
         stub.close()
 
 
+def test_a_thumbnail_comes_back_as_pixels_with_its_geometry():
+    pixels = bytes([7]) * (16 * 8 * 4)
+    stub = StubDaemon([
+        HELLO,
+        frame({
+            "ev": "thumb", "req": 1,
+            "width": 16, "height": 8, "stride": 64, "bytes": len(pixels),
+        }) + pixels,
+    ])
+    try:
+        with Client(path=stub.path) as client:
+            thumbnail = client.thumb(3)
+        assert (thumbnail.width, thumbnail.height, thumbnail.stride) == (16, 8, 64)
+        assert thumbnail.pixels == pixels
+        # The geometry has to describe the payload, or a caller uploading it
+        # reads past the end of the buffer.
+        assert len(thumbnail.pixels) == thumbnail.stride * thumbnail.height
+    finally:
+        stub.close()
+
+
 def test_broadcasts_do_not_get_mistaken_for_an_answer():
     stub = StubDaemon([
         HELLO,
@@ -151,6 +190,8 @@ def test_a_whole_part_declares_its_length_up_front():
             entry, created = client.record([("text/plain", b"hello")], source="test")
         assert (entry, created) == (9, True)
 
+        # hello, begin, part, commit
+        stub.wait_for(4)
         part = next(f for f in stub.received if f.get("op") == "part")
         assert part["bytes"] == 5
         assert stub.payloads == [b"hello"]
@@ -169,6 +210,8 @@ def test_a_part_of_unknown_length_is_chunked_and_terminated():
         with Client(path=stub.path, role="capture") as client:
             client.record([("application/octet-stream", iter([b"one", b"two"]))])
 
+        # hello, begin, part, two chunks, terminator, commit
+        stub.wait_for(7)
         part = next(f for f in stub.received if f.get("op") == "part")
         # No length: that is what puts the daemon into chunked mode.
         assert "bytes" not in part
@@ -191,9 +234,45 @@ def test_an_empty_piece_does_not_end_a_chunked_part_early():
         with Client(path=stub.path, role="capture") as client:
             client.record([("text/plain", iter([b"a", b"", b"b"]))])
 
+        # hello, begin, part, two chunks, terminator, commit
+        stub.wait_for(7)
         chunks = [c["bytes"] for c in stub.received if c.get("op") == "chunk"]
         # The empty piece is skipped; only the terminator is zero.
         assert chunks == [1, 1, 0]
+    finally:
+        stub.close()
+
+
+def test_a_source_that_fails_part_way_still_terminates_its_part():
+    def failing():
+        yield b"good"
+        raise OSError("the staging file vanished")
+
+    # The stub answers one frame per frame received, and the daemon answers no
+    # chunks, so those three slots are deliberately silent.
+    stub = StubDaemon([
+        HELLO,                                          # hello
+        frame({"ev": "begin", "req": 1, "draft": 3}),   # begin
+        b"",                                            # part
+        b"",                                            # chunk
+        b"",                                            # terminator
+        frame({"ev": "ok", "req": 3}),                  # abort
+    ])
+    try:
+        with Client(path=stub.path, role="capture") as client:
+            with pytest.raises(TruncatedPart):
+                client.record([("image/png", failing())])
+
+        # hello, begin, part, one chunk, terminator, abort
+        stub.wait_for(6)
+        chunks = [c["bytes"] for c in stub.received if c.get("op") == "chunk"]
+        # The terminator is sent regardless: without it the daemon would wait
+        # for chunk bytes for ever and every later frame would be stranded.
+        assert chunks == [4, 0]
+        # And the draft is abandoned rather than committed, so nothing half
+        # transferred is ever archived.
+        assert any(f.get("op") == "abort" for f in stub.received)
+        assert not any(f.get("op") == "commit" for f in stub.received)
     finally:
         stub.close()
 
@@ -203,6 +282,7 @@ def test_optional_fields_left_unset_are_not_sent():
     try:
         with Client(path=stub.path) as client:
             client.list(limit=10)
+        stub.wait_for(2)
         listing = next(f for f in stub.received if f.get("op") == "list")
         # Sending `"query": null` would ask the daemon to search for nothing
         # rather than to leave the search out.

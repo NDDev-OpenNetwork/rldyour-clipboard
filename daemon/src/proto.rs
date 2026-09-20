@@ -185,6 +185,19 @@ pub enum Response {
         mime: String,
         bytes: u64,
     },
+    /// A thumbnail, as straight RGBA followed by `bytes` raw bytes.
+    ///
+    /// Separate from `blob` because it is pixels rather than a file: the only
+    /// way a GNOME Shell extension can draw arbitrary image data is to hand
+    /// `St.ImageContent` a buffer and its geometry, so the geometry travels
+    /// with it rather than having to be decoded out of a container.
+    Thumb {
+        req: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        bytes: u64,
+    },
     Stats {
         req: u64,
         entries: i64,

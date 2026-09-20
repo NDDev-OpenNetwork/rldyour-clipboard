@@ -10,7 +10,13 @@ import GObject from 'gi://GObject';
 import Pango from 'gi://Pango';
 import St from 'gi://St';
 
-import {setScrollChild, setScrollPolicy, setVertical, verticalBox} from './compat.js';
+import {
+    setImageBytes,
+    setScrollPolicy,
+    setVertical,
+    verticalAdjustment,
+    verticalBox,
+} from './compat.js';
 import {age, iconFor, size, swatch, title} from './format.js';
 
 /** Entries fetched per request. More arrive as the list is scrolled. */
@@ -37,16 +43,19 @@ const FILTERS = [
  * a hundred thousand entries; what is built here is one window of forty.
  */
 export const Picker = GObject.registerClass({
+    // Explicit for the same reason as the indicator: a GType name derived
+    // from the path collides with any extension laid out the same way.
+    GTypeName: 'RldyourClipboardPicker',
     Signals: {
-        /** A row was chosen: `(entry id, paste)`. */
-        'activated': {param_types: [GObject.TYPE_INT64, GObject.TYPE_BOOLEAN]},
+        /** A row was chosen: `(entry summary, paste)`. */
+        'activated': {param_types: [GObject.TYPE_JSOBJECT, GObject.TYPE_BOOLEAN]},
         /** The picker wants to be dismissed. */
         'dismissed': {},
     },
 }, class Picker extends St.BoxLayout {
     _init(client) {
-        // The orientation is set afterwards rather than passed in, because
-        // the property it lives under differs across the shells supported.
+        // The orientation is set afterwards rather than passed in, because the
+        // property it lives under differs across the shells supported.
         super._init({styleClass: 'rldyour-picker'});
         setVertical(this);
 
@@ -62,6 +71,13 @@ export const Picker = GObject.registerClass({
 
         this.add_child(this._buildSearch());
         this.add_child(this._buildFilters());
+        // The placeholder is a sibling of the list rather than its first
+        // child, so inserting a new row is always an insert at zero.
+        this._empty = new St.Label({
+            styleClass: 'rldyour-empty',
+            text: 'Nothing here yet. Copy something.',
+        });
+        this.add_child(this._empty);
         this.add_child(this._buildList());
         this.add_child(this._buildFooter());
     }
@@ -112,27 +128,20 @@ export const Picker = GObject.registerClass({
     _buildList() {
         this._list = verticalBox({styleClass: 'rldyour-list'});
 
-        this._empty = new St.Label({
-            styleClass: 'rldyour-empty',
-            text: 'Nothing here yet. Copy something.',
-        });
-        this._list.add_child(this._empty);
-
         this._scroll = new St.ScrollView({
             styleClass: 'rldyour-scroll',
             yExpand: true,
-            // The popup is already inside the shell's own scroll handling;
-            // overlay scrollbars would sit on top of the rows.
+            // The rows already sit in a narrow popup; a scrollbar taking
+            // width from them would cost a character of every preview.
             overlayScrollbars: true,
         });
         setScrollPolicy(this._scroll);
-        setScrollChild(this._scroll, this._list);
+        this._scroll.child = this._list;
 
         // Paging happens on scroll rather than behind a button, so a long
         // archive reads as one list however much of it has been fetched.
         this._adjustment = verticalAdjustment(this._scroll);
-        this._adjustment?.connect('notify::value',
-            () => this._maybeLoadMore(this._adjustment));
+        this._adjustment?.connect('notify::value', () => this._maybeLoadMore());
 
         return this._scroll;
     }
@@ -168,7 +177,7 @@ export const Picker = GObject.registerClass({
         this._clearRows();
         this._selected = -1;
         this._load().catch(error => this._report(error));
-        this._updateSummary().catch(() => {});
+        this._updateSummary().catch(error => this._report(error));
     }
 
     async _load() {
@@ -184,6 +193,8 @@ export const Picker = GObject.registerClass({
                 kind: this._kind,
             });
 
+            // A short page is the end of the archive, so no further request is
+            // made however far the list is scrolled.
             if (items.length < PAGE)
                 this._exhausted = true;
             for (const entry of items)
@@ -191,16 +202,14 @@ export const Picker = GObject.registerClass({
             if (items.length > 0)
                 this._oldest = items[items.length - 1].id;
 
-            this._empty.visible = this._rows.size === 0;
-            this._empty.text = this._query
-                ? 'Nothing matches that.'
-                : 'Nothing here yet. Copy something.';
+            this._showPlaceholder();
         } finally {
             this._loading = false;
         }
     }
 
-    _maybeLoadMore(adjustment) {
+    _maybeLoadMore() {
+        const adjustment = this._adjustment;
         if (!adjustment || this._loading || this._exhausted)
             return;
         const remaining = adjustment.upper - adjustment.pageSize - adjustment.value;
@@ -208,18 +217,35 @@ export const Picker = GObject.registerClass({
             this._load().catch(error => this._report(error));
     }
 
+    _showPlaceholder() {
+        const empty = this._rows.size === 0;
+        this._empty.visible = empty;
+        this._scroll.visible = !empty;
+        this._empty.text = this._query
+            ? 'Nothing matches that.'
+            : 'Nothing here yet. Copy something.';
+    }
+
     // -- rows ------------------------------------------------------------
 
-    _addRow(entry) {
+    /**
+     * Builds a row and connects it.
+     *
+     * One place, because a row created on an archive broadcast must behave
+     * exactly like one created by a list request — and two copies of the
+     * wiring is how that stops being true.
+     */
+    _makeRow(entry) {
         const row = new Row(entry, this._client);
-        row.connect('activated', (_row, paste) => {
-            this.emit('activated', entry.id, paste);
-        });
-        row.connect('pin-toggled', () => this._onPin(entry));
-        row.connect('removed', () => this._onRemove(entry));
-
+        row.connect('activated', (_row, paste) => this.emit('activated', row.entry, paste));
+        row.connect('pin-toggled', () => this._onPin(row.entry));
+        row.connect('removed', () => this._onRemove(row.entry));
         this._rows.set(entry.id, row);
-        this._list.add_child(row);
+        return row;
+    }
+
+    _addRow(entry) {
+        this._list.add_child(this._makeRow(entry));
     }
 
     _clearRows() {
@@ -232,29 +258,23 @@ export const Picker = GObject.registerClass({
     onArchiveEvent(event) {
         switch (event.ev) {
         case 'added':
-            // Only when looking at the unfiltered top of the list: inserting
-            // into a search result the entry may not match would be a lie.
+            // Only at the unfiltered top of the list: inserting into a search
+            // result an entry may not match would be a lie about the search.
             if (!this._query && !this._kind && !this._rows.has(event.entry.id)) {
-                const row = new Row(event.entry, this._client);
-                row.connect('activated', (_row, paste) =>
-                    this.emit('activated', event.entry.id, paste));
-                row.connect('pin-toggled', () => this._onPin(event.entry));
-                row.connect('removed', () => this._onRemove(event.entry));
-                this._rows.set(event.entry.id, row);
-                this._list.insert_child_at_index(row, 1);
-                this._empty.visible = false;
+                this._list.insert_child_at_index(this._makeRow(event.entry), 0);
+                this._showPlaceholder();
             }
             break;
         case 'removed':
             this._rows.get(event.entry)?.destroy();
             this._rows.delete(event.entry);
-            this._empty.visible = this._rows.size === 0;
+            this._showPlaceholder();
             break;
         case 'cleared':
             this.refresh();
             break;
         }
-        this._updateSummary().catch(() => {});
+        this._updateSummary().catch(error => this._report(error));
     }
 
     // -- interaction -----------------------------------------------------
@@ -303,10 +323,10 @@ export const Picker = GObject.registerClass({
             const rows = [...this._rows.values()];
             const row = rows[this._selected >= 0 ? this._selected : 0];
             if (row) {
-                // Shift pastes without the shortcut, for somewhere the paste
-                // keystroke would be wrong.
+                // Shift puts the entry on the clipboard without typing the
+                // paste, for somewhere the shortcut would be wrong.
                 const paste = (event.get_state() & Clutter.ModifierType.SHIFT_MASK) === 0;
-                this.emit('activated', row.entryId, paste);
+                this.emit('activated', row.entry, paste);
             }
             return Clutter.EVENT_STOP;
         }
@@ -391,16 +411,6 @@ export const Picker = GObject.registerClass({
 });
 
 /**
- * The vertical adjustment of a scroll view, whichever way this shell exposes
- * it: GNOME 46 has the `vscroll` child bar, later versions only the getter.
- */
-function verticalAdjustment(scrollView) {
-    if (typeof scrollView.get_vadjustment === 'function')
-        return scrollView.get_vadjustment();
-    return scrollView.vscroll?.adjustment ?? null;
-}
-
-/**
  * One archived entry.
  *
  * A row shows what the summary already says. The one thing it fetches is a
@@ -408,6 +418,7 @@ function verticalAdjustment(scrollView) {
  * drawing the list never decodes an image in this process.
  */
 const Row = GObject.registerClass({
+    GTypeName: 'RldyourClipboardRow',
     Signals: {
         'activated': {param_types: [GObject.TYPE_BOOLEAN]},
         'pin-toggled': {},
@@ -421,7 +432,6 @@ const Row = GObject.registerClass({
             xExpand: true,
         });
 
-        this.entryId = entry.id;
         this._entry = entry;
         this._client = client;
         this._cancellable = new Gio.Cancellable();
@@ -437,6 +447,11 @@ const Row = GObject.registerClass({
 
         if (entry.thumb)
             this._loadThumbnail();
+    }
+
+    /** The summary this row was built from, kept current by the picker. */
+    get entry() {
+        return this._entry;
     }
 
     _buildGlyph(entry) {
@@ -487,6 +502,9 @@ const Row = GObject.registerClass({
             yAlign: Clutter.ActorAlign.CENTER,
         });
 
+        // These sit inside the row, which is itself a button. A nested
+        // St.Button consumes the press that reaches it, so clicking one does
+        // not also activate the row underneath.
         this._pin = new St.Button({
             styleClass: entry.pinned ? 'rldyour-action rldyour-pinned' : 'rldyour-action',
             canFocus: true,
@@ -495,10 +513,7 @@ const Row = GObject.registerClass({
                 styleClass: 'rldyour-action-icon',
             }),
         });
-        this._pin.connect('clicked', () => {
-            this.emit('pin-toggled');
-            return Clutter.EVENT_STOP;
-        });
+        this._pin.connect('clicked', () => this.emit('pin-toggled'));
         box.add_child(this._pin);
 
         const remove = new St.Button({
@@ -509,10 +524,7 @@ const Row = GObject.registerClass({
                 styleClass: 'rldyour-action-icon',
             }),
         });
-        remove.connect('clicked', () => {
-            this.emit('removed');
-            return Clutter.EVENT_STOP;
-        });
+        remove.connect('clicked', () => this.emit('removed'));
         box.add_child(remove);
 
         return box;
@@ -521,21 +533,26 @@ const Row = GObject.registerClass({
     /**
      * Replaces the kind icon with the daemon's thumbnail.
      *
-     * The bytes are a PNG of at most 256 pixels that the daemon already made,
-     * handed to the shell's texture cache as a loadable icon. Decoding an
-     * original image here is exactly what the daemon exists to prevent.
+     * The daemon decoded them, so nothing is decoded here. A list of forty
+     * rows would otherwise be forty decodes on the compositor's thread, which
+     * is the one thing this whole split exists to avoid. `setImageBytes`
+     * covers the argument change GNOME 48 made to `set_bytes`.
      */
     _loadThumbnail() {
         this._client.thumb(this._entry.id)
-            .then(bytes => {
+            .then(({width, height, stride, bytes}) => {
                 if (this._cancellable.is_cancelled())
                     return;
+                const content = St.ImageContent.new_with_preferred_size(width, height);
+                setImageBytes(content, bytes, width, height, stride);
                 this._glyph.styleClass = 'rldyour-thumb';
-                this._glyph.gicon = Gio.BytesIcon.new(bytes);
+                this._glyph.gicon = content;
             })
-            .catch(() => {
+            .catch(error => {
                 // An entry removed between the list and the thumbnail, or one
-                // whose thumbnail is gone. The kind icon is already showing.
+                // whose thumbnail will not decode. The kind icon is already
+                // showing, so there is nothing to put right.
+                console.debug(`rldyour-clipboard: no thumbnail for ${this._entry.id}: ${error}`);
             });
     }
 

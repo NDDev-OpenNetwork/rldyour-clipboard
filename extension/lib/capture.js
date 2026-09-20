@@ -140,35 +140,47 @@ export class Capture {
      */
     async _recordOne(draft, type, mime) {
         const staging = this._stagingFile();
+        let source = null;
 
         try {
-            const target = staging.replace(null, false, Gio.FileCreateFlags.PRIVATE,
-                this._cancellable);
-            // -1 means "no limit": the compositor splices the whole selection
-            // in, which is what lets an entry be any size at all.
-            await this._selection.transfer_async(type, mime, -1, target, this._cancellable);
+            try {
+                const target = staging.replace(null, false, Gio.FileCreateFlags.PRIVATE,
+                    this._cancellable);
+                // -1 means "no limit": the compositor splices the whole
+                // selection in, which is what lets an entry be any size.
+                await this._selection.transfer_async(type, mime, -1, target,
+                    this._cancellable);
 
-            const size = staging.query_info('standard::size',
-                Gio.FileQueryInfoFlags.NONE, this._cancellable).get_size();
-            if (size === 0)
-                return false;
-            if (size > this._maximumBytes()) {
-                console.debug(`rldyour-clipboard: skipping ${mime}, ${size} bytes is over the limit`);
+                const size = staging.query_info('standard::size',
+                    Gio.FileQueryInfoFlags.NONE, this._cancellable).get_size();
+                if (size === 0)
+                    return false;
+                if (size > this._maximumBytes()) {
+                    console.debug(
+                        `rldyour-clipboard: skipping ${mime}, ${size} bytes is over the limit`);
+                    return false;
+                }
+
+                source = staging.read(this._cancellable);
+            } catch (error) {
+                if (error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                    throw error;
+                // Nothing has been sent yet, so this costs the entry one
+                // representation and not the others. A source advertising a
+                // target it cannot actually produce is common.
+                console.debug(`rldyour-clipboard: could not read ${mime}: ${error}`);
                 return false;
             }
 
-            const source = staging.read(this._cancellable);
+            // Past this point bytes are on their way to the daemon, so a
+            // failure is no longer this representation's own business: it
+            // throws, and the caller abandons the whole draft.
             try {
                 await this._client.part(draft, mime, source);
             } finally {
                 source.close(null);
             }
             return true;
-        } catch (error) {
-            if (error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
-                throw error;
-            console.debug(`rldyour-clipboard: could not read ${mime}: ${error}`);
-            return false;
         } finally {
             try {
                 staging.delete(null);

@@ -57,6 +57,13 @@ First release.
   Linux.
 - No tray client for either yet; both expose the same protocol.
 
+### Thumbnails
+
+- Made by the daemon, stored compressed, and served as straight RGBA with its
+  geometry. The client decodes nothing, which is what lets a list of forty
+  images open without the compositor stalling — and is also the only form the
+  shell's texture cache will render from raw data.
+
 ### Secrets
 
 - An entry offering `x-kde-passwordManagerHint`, the NSPasteboard concealed

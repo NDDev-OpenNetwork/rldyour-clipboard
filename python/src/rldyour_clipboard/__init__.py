@@ -16,7 +16,7 @@ import os
 import socket
 import sys
 from pathlib import Path
-from typing import Any, Iterator, Optional, Sequence, TypedDict
+from typing import Any, Iterator, NamedTuple, Optional, Sequence, TypedDict
 
 __version__ = "0.1.0"
 
@@ -40,6 +40,28 @@ class Summary(TypedDict):
     pinned: bool
     source: Optional[str]
     at: int
+
+
+class Thumbnail(NamedTuple):
+    """An entry's thumbnail, as straight eight-bit RGBA."""
+
+    width: int
+    height: int
+    stride: int
+    pixels: bytes
+
+
+class TruncatedPart(RuntimeError):
+    """A representation that was only partly sent.
+
+    Distinct from any other failure because of what it means for the draft:
+    the daemon holds a short copy of this representation, so the entry must be
+    abandoned rather than committed.
+    """
+
+    def __init__(self, mime: str) -> None:
+        super().__init__(f"the {mime} representation was cut off")
+        self.mime = mime
 
 
 class ProtocolError(RuntimeError):
@@ -165,9 +187,20 @@ class Client:
         answer = self._request("fetch", entry=entry, mime=mime)
         return answer["mime"], self._read_payload(answer["bytes"])
 
-    def thumb(self, entry: int) -> bytes:
+    def thumb(self, entry: int) -> "Thumbnail":
+        """Return an entry's thumbnail as decoded RGBA pixels.
+
+        The daemon stores thumbnails compressed and decodes them per request,
+        so a client has nothing to decode. ``stride`` is ``width * 4`` with no
+        row padding.
+        """
         answer = self._request("thumb", entry=entry)
-        return self._read_payload(answer["bytes"])
+        return Thumbnail(
+            width=answer["width"],
+            height=answer["height"],
+            stride=answer["stride"],
+            pixels=self._read_payload(answer["bytes"]),
+        )
 
     def stats(self) -> dict[str, Any]:
         return self._request("stats")
@@ -239,12 +272,24 @@ class Client:
         self._next_req += 1
         # No `bytes`: the daemon reads chunk frames until a zero-length one.
         self._send({"op": "part", "req": req, "draft": draft, "mime": mime})
-        for chunk in chunks:
-            if not chunk:
-                # A zero-length chunk is the terminator, so an empty piece
-                # would end the part early.
-                continue
-            self._send({"op": "chunk", "bytes": len(chunk)}, bytes(chunk))
+
+        try:
+            for chunk in chunks:
+                if not chunk:
+                    # A zero-length chunk is the terminator, so an empty piece
+                    # would end the part early.
+                    continue
+                self._send({"op": "chunk", "bytes": len(chunk)}, bytes(chunk))
+        except Exception as error:
+            # The daemon is reading chunks, and every frame after this part is
+            # on the far side of the terminator. Leaving it out would strand
+            # the connection, so it is sent even though the part is short.
+            self._send({"op": "chunk", "bytes": 0})
+            # Raised so the caller abandons the draft: what reached the daemon
+            # is a truncated representation, and committing it would archive
+            # half a picture as though it were whole.
+            raise TruncatedPart(mime) from error
+
         self._send({"op": "chunk", "bytes": 0})
         self._await(req)
 

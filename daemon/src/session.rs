@@ -200,21 +200,33 @@ impl Session {
                 }
             }
 
-            Request::Thumb { entry, .. } => match self.store.open_thumb(entry) {
-                Ok(Some((mut file, bytes))) => self.out.send_blob(
-                    &Response::Blob {
-                        req,
-                        mime: "image/png".into(),
+            Request::Thumb { entry, .. } => match self.store.thumbnail(entry) {
+                Ok(Some(pixels)) => {
+                    let bytes = pixels.rgba.len() as u64;
+                    self.out.send_blob(
+                        &Response::Thumb {
+                            req,
+                            width: pixels.width,
+                            height: pixels.height,
+                            stride: pixels.stride(),
+                            bytes,
+                        },
+                        &mut std::io::Cursor::new(&pixels.rgba),
                         bytes,
-                    },
-                    &mut file,
-                    bytes,
-                ),
-                Ok(None) => self.out.send(&Response::error(
-                    Some(req),
-                    code::NO_SUCH_ENTRY,
-                    format!("entry {entry} has no thumbnail"),
-                )),
+                    )
+                }
+                Ok(None) => {
+                    // The same distinction `fetch` draws: whether to ask for
+                    // something else or to forget the entry.
+                    let (code, message) = match self.store.summary(entry) {
+                        Ok(Some(_)) => (
+                            code::NO_SUCH_MIME,
+                            format!("entry {entry} has no thumbnail"),
+                        ),
+                        _ => (code::NO_SUCH_ENTRY, format!("entry {entry} is gone")),
+                    };
+                    self.out.send(&Response::error(Some(req), code, message))
+                }
                 Err(error) => self.failed(req, &error),
             },
 
@@ -382,8 +394,7 @@ impl Session {
                     let result = writer.absorb(&mut (&mut counted).take(bytes), bytes);
                     let consumed = counted.read;
                     if let Err(error) = result {
-                        let _ = consumed;
-                        drain(input, bytes)?;
+                        drain(input, bytes - consumed)?;
                         failure = Some(error);
                         // Dropping the writer removes its temporary, so a part
                         // that failed leaves nothing half-stored behind.
@@ -812,6 +823,30 @@ mod tests {
         peer.send(r#"{"op":"commit","req":3,"draft":1}"#, b"");
         let commit = peer.answer();
         assert!(commit.contains(r#""req":3"#), "{commit}");
+    }
+
+    #[test]
+    fn a_missing_thumbnail_and_a_missing_entry_answer_differently() {
+        let mut peer = Peer::open(1024 * 1024);
+        peer.send(r#"{"op":"begin","req":1}"#, b"");
+        peer.answer();
+        peer.send(
+            r#"{"op":"part","req":2,"draft":1,"mime":"text/plain","bytes":4}"#,
+            b"text",
+        );
+        peer.answer();
+        peer.send(r#"{"op":"commit","req":3,"draft":1}"#, b"");
+        assert!(peer.answer().contains(r#""entry":1"#));
+
+        // Text has no thumbnail, but the entry is there: the client should
+        // ask for something else, not forget the entry.
+        peer.send(r#"{"op":"thumb","req":4,"entry":1}"#, b"");
+        let no_thumb = peer.answer();
+        assert!(no_thumb.contains(r#""code":"no-such-mime""#), "{no_thumb}");
+
+        peer.send(r#"{"op":"thumb","req":5,"entry":999}"#, b"");
+        let no_entry = peer.answer();
+        assert!(no_entry.contains(r#""code":"no-such-entry""#), "{no_entry}");
     }
 
     #[test]
