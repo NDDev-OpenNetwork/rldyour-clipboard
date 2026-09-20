@@ -35,7 +35,9 @@ mkdir -p "${HOME}/.local/share/rldyour-clipboard"
 say "Enabling the socket"
 systemctl --user daemon-reload
 # The socket carries the activation: the service starts on the first
-# connection and exits again once nobody has been connected for a while.
+# connection. Where it can watch the clipboard itself — any X11 session —
+# it stays resident to keep capturing; otherwise it exits once nobody has
+# been connected for a while.
 systemctl --user enable --now rldyour-clipboardd.socket
 
 say "Installing the extension into ${EXT_DIR}"
