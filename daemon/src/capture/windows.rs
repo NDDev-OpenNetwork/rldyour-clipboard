@@ -189,35 +189,37 @@ fn push(parts: &mut Vec<(String, Vec<u8>)>, mime: &str, content: Option<Vec<u8>>
 
 /// Whether any offered format says the contents are a secret.
 fn concealed() -> bool {
-    // The names password managers register on Windows to opt out of clipboard
-    // history, including the one Windows' own history honours.
-    const HINTS: &[&str] = &[
+    // Formats whose presence alone means "keep this out of history": the one
+    // Windows' own history honours, plus the older KeePass convention that
+    // Ditto-era clipboard tools still watch for.
+    for name in [
         "ExcludeClipboardContentFromMonitorProcessing",
-        "CanIncludeInClipboardHistory",
-        "CanUploadToCloudClipboard",
-        "PasswordManagerHint",
-    ];
-
-    // `ExcludeClipboardContentFromMonitorProcessing` present at all means
-    // exclude; the other two are read as flags whose absence means allow.
-    if let Some(format) = lookup("ExcludeClipboardContentFromMonitorProcessing") {
-        if unsafe { IsClipboardFormatAvailable(format) } != 0 {
-            return true;
-        }
-    }
-    if let Some(format) = lookup("CanIncludeInClipboardHistory") {
-        if unsafe { IsClipboardFormatAvailable(format) } != 0 {
-            // A DWORD of zero means "do not keep this".
-            if let Some(value) = raw(format) {
-                if value.len() >= 4
-                    && u32::from_le_bytes([value[0], value[1], value[2], value[3]]) == 0
-                {
-                    return true;
-                }
+        "Clipboard Viewer Ignore",
+        "ClipboardViewerIgnore",
+    ] {
+        if let Some(format) = lookup(name) {
+            if unsafe { IsClipboardFormatAvailable(format) } != 0 {
+                return true;
             }
         }
     }
-    let _ = HINTS;
+
+    // DWORD flags where zero opts out: one keeps the clip out of local
+    // history, the other out of cloud sync. Password managers set them
+    // together, and content that may not leave the machine does not belong in
+    // an archive either. A flag that is offered but unreadable is treated the
+    // same as zero — erring the other way writes a secret to disk.
+    for name in ["CanIncludeInClipboardHistory", "CanUploadToCloudClipboard"] {
+        let Some(format) = registered(name) else {
+            continue;
+        };
+        match raw(format) {
+            Some(value)
+                if value.len() >= 4
+                    && u32::from_le_bytes([value[0], value[1], value[2], value[3]]) != 0 => {}
+            _ => return true,
+        }
+    }
     false
 }
 
