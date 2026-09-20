@@ -165,7 +165,7 @@ that closes with drafts open aborts them.
 | Field | Meaning |
 |---|---|
 | `limit` | At most this many entries; the daemon caps it at 500 |
-| `before` | Return only entries older than this id, for paging |
+| `before` | Entries sorting after this one — the paging cursor, resolved against the pinned-first ordering rather than the raw id |
 | `query` | Full-text match over text representations and file names; omitted means everything |
 | `kind` | Restrict to one kind; omitted means every kind |
 | `pinned` | `true` lists only favorites, `false` only unpinned entries; omitted lists everything |

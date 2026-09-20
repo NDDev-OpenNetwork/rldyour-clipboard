@@ -54,6 +54,10 @@ the script.
   restarts and reboots with the archive. `list` takes `pinned: bool` to page
   favorites alone; `stats` adds a `pinned` count. Picker tabs: Recent
   (`pinned:false`, last 10 first) vs Favorites (`pinned:true`, PAGE-sized).
+- **Paging is keyset, not `id <`**: `before` resolves the cursor row's
+  `(pinned, at)` because the order is `pinned DESC, at DESC` — an id bound
+  drops rows at the pinned seam and past re-copied (touched) entries. A
+  removed cursor row falls back to the id approximation.
 - **Lifecycle**: socket-activated daemon stays resident while it can watch the
   clipboard itself; it idle-exits (2 min) only when nothing is capturing.
 - `RLDYOUR_CLIPBOARD_HOME` relocates archive **and** socket together on every

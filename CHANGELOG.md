@@ -33,7 +33,9 @@ First release.
   demand — currently `image/bmp` from any stored image, the one image form an
   RDP client can receive.
 - `list` accepts a `pinned` filter, so clients can page the favorites list on
-  its own; `stats` reports how many entries are pinned.
+  its own; `stats` reports how many entries are pinned. The `before` cursor
+  now resolves the row's position in the pinned-first ordering, so paging no
+  longer drops entries at the pinned boundary or past a re-copied row.
 - The socket sits beside the archive it serves: `RLDYOUR_CLIPBOARD_HOME`
   relocates both on every platform and in every client.
 - Specified in `docs/protocol.md`, with a dependency-free Python client.

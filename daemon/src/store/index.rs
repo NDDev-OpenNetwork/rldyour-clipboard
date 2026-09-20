@@ -227,6 +227,26 @@ impl Index {
         let limit = limit.clamp(1, MAX_LIMIT);
         let matching = query.map(fts_query).filter(|text| !text.is_empty());
 
+        // `before` is a position in the ordering, not merely an id: pinned
+        // entries sort first and a re-copied entry keeps its old id under a
+        // new timestamp, so `id <` alone would silently drop rows at either
+        // seam. The cursor resolves to the row's own sort key and the page is
+        // whatever sorts strictly after it. If the cursor row is gone the
+        // approximation falls back to the id, which is close enough for a
+        // deleted entry.
+        let mark = before
+            .map(|id| {
+                self.connection
+                    .query_row("SELECT pinned, at FROM entry WHERE id = ?1", [id], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                    })
+                    .optional()
+            })
+            .transpose()?
+            .flatten();
+        let mark_pinned = mark.map(|m| m.0);
+        let mark_at = mark.map(|m| m.1);
+
         // Built by branch rather than by string concatenation so every value
         // stays a bound parameter. `?N IS NULL OR pinned = ?N` is how an
         // absent filter keeps meaning "all".
@@ -234,34 +254,50 @@ impl Index {
             (None, None) => self.select(
                 "SELECT id, kind, bytes, preview, width, height, thumb, pinned, source, at
                  FROM entry
-                 WHERE (?1 IS NULL OR id < ?1) AND (?3 IS NULL OR pinned = ?3)
-                 ORDER BY pinned DESC, at DESC, id DESC LIMIT ?2",
-                params![before, limit, pinned],
+                 WHERE (?1 IS NULL OR (?2 IS NULL AND id < ?1)
+                        OR (pinned, at, id) < (?2, ?3, ?1))
+                   AND (?5 IS NULL OR pinned = ?5)
+                 ORDER BY pinned DESC, at DESC, id DESC LIMIT ?4",
+                params![before, mark_pinned, mark_at, limit, pinned],
             )?,
             (None, Some(kind)) => self.select(
                 "SELECT id, kind, bytes, preview, width, height, thumb, pinned, source, at
                  FROM entry
-                 WHERE (?1 IS NULL OR id < ?1) AND kind = ?3 AND (?4 IS NULL OR pinned = ?4)
-                 ORDER BY pinned DESC, at DESC, id DESC LIMIT ?2",
-                params![before, limit, kind.as_str(), pinned],
+                 WHERE (?1 IS NULL OR (?2 IS NULL AND id < ?1)
+                        OR (pinned, at, id) < (?2, ?3, ?1))
+                   AND kind = ?5 AND (?6 IS NULL OR pinned = ?6)
+                 ORDER BY pinned DESC, at DESC, id DESC LIMIT ?4",
+                params![before, mark_pinned, mark_at, limit, kind.as_str(), pinned],
             )?,
             (Some(text), None) => self.select(
                 "SELECT e.id, e.kind, e.bytes, e.preview, e.width, e.height, e.thumb,
                         e.pinned, e.source, e.at
                  FROM entry e JOIN entry_fts f ON f.rowid = e.id
-                 WHERE f.body MATCH ?3 AND (?1 IS NULL OR e.id < ?1)
-                       AND (?4 IS NULL OR e.pinned = ?4)
-                 ORDER BY e.pinned DESC, e.at DESC, e.id DESC LIMIT ?2",
-                params![before, limit, text, pinned],
+                 WHERE f.body MATCH ?5
+                       AND (?1 IS NULL OR (?2 IS NULL AND e.id < ?1)
+                            OR (e.pinned, e.at, e.id) < (?2, ?3, ?1))
+                       AND (?6 IS NULL OR e.pinned = ?6)
+                 ORDER BY e.pinned DESC, e.at DESC, e.id DESC LIMIT ?4",
+                params![before, mark_pinned, mark_at, limit, text, pinned],
             )?,
             (Some(text), Some(kind)) => self.select(
                 "SELECT e.id, e.kind, e.bytes, e.preview, e.width, e.height, e.thumb,
                         e.pinned, e.source, e.at
                  FROM entry e JOIN entry_fts f ON f.rowid = e.id
-                 WHERE f.body MATCH ?3 AND (?1 IS NULL OR e.id < ?1) AND e.kind = ?4
-                       AND (?5 IS NULL OR e.pinned = ?5)
-                 ORDER BY e.pinned DESC, e.at DESC, e.id DESC LIMIT ?2",
-                params![before, limit, text, kind.as_str(), pinned],
+                 WHERE f.body MATCH ?5
+                       AND (?1 IS NULL OR (?2 IS NULL AND e.id < ?1)
+                            OR (e.pinned, e.at, e.id) < (?2, ?3, ?1))
+                       AND e.kind = ?6 AND (?7 IS NULL OR e.pinned = ?7)
+                 ORDER BY e.pinned DESC, e.at DESC, e.id DESC LIMIT ?4",
+                params![
+                    before,
+                    mark_pinned,
+                    mark_at,
+                    limit,
+                    text,
+                    kind.as_str(),
+                    pinned
+                ],
             )?,
         };
 
@@ -629,6 +665,54 @@ mod tests {
         index.set_pinned(old, true).unwrap();
         let listed = index.list(10, None, None, None, None).unwrap();
         assert_eq!(listed[0].id, old, "a pinned entry outranks a newer one");
+    }
+
+    #[test]
+    fn paging_past_a_reordered_row_drops_nothing() {
+        // `before` is a position in the ordering, not an id bound: both seams
+        // are exercised here. A pinned row sorts first under an old id, and a
+        // touched row sorts first under an old id too — `id <` would lose the
+        // rows sitting between them.
+        let (mut index, _dir) = index();
+        let pinned_id = index
+            .insert("a", &[part("text/plain", "aa", 1)], &text_facts("a"), 100)
+            .unwrap();
+        let mut rest = Vec::new();
+        for i in 1..=5 {
+            rest.push(
+                index
+                    .insert(
+                        &format!("id-{i}"),
+                        &[part("text/plain", &format!("d{i}"), 1)],
+                        &text_facts("x"),
+                        200 + i as i64,
+                    )
+                    .unwrap(),
+            );
+        }
+        index.set_pinned(pinned_id, true).unwrap();
+        // Re-copying the newest moves its timestamp; it keeps its old id.
+        index.touch("id-5", 999).unwrap();
+
+        let page1 = index.list(2, None, None, None, None).unwrap();
+        assert_eq!(page1[0].id, pinned_id, "pinned sorts first");
+        assert_eq!(page1[1].id, rest[4], "the touched entry follows");
+
+        // The cursor sits on a row whose id is newer than most of what
+        // follows — exactly where `id <` used to lose entries.
+        let page2 = index.list(10, Some(rest[4]), None, None, None).unwrap();
+        assert_eq!(page2.len(), 4, "every remaining row survives the seam");
+        assert!(page2.iter().all(|s| s.id != pinned_id));
+
+        // And across the pinned boundary itself.
+        let after_pinned = index.list(10, Some(pinned_id), None, None, None).unwrap();
+        assert_eq!(after_pinned.len(), 5);
+
+        // A cursor whose row was removed between pages still pages on —
+        // the sort key is unrecoverable, so the id approximates it.
+        index.remove(rest[4]).unwrap();
+        let after_gone = index.list(10, Some(rest[4]), None, None, None).unwrap();
+        assert!(!after_gone.is_empty());
     }
 
     #[test]
