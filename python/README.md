@@ -13,12 +13,24 @@ rldyour-clipboard list
 rldyour-clipboard get 42 > screenshot.png
 ```
 
+Pinned entries are the favorites list — a durable store for prompts,
+snippets and media that eviction, `clear` and restarts never touch:
+
+```sh
+rldyour-clipboard pin 42            # star an entry
+rldyour-clipboard list --favorites  # the prompt store, ready to pipe
+rldyour-clipboard unpin 42
+```
+
 ```python
 from rldyour_clipboard import Client
 
 with Client() as clipboard:
     for entry in clipboard.list(query="rebase"):
         print(entry["id"], entry["preview"])
+
+    for prompt in clipboard.favorites():
+        mime, content = clipboard.fetch(prompt["id"])
 
     mime, content = clipboard.fetch(42)
 ```
