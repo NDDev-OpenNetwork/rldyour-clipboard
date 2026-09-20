@@ -232,9 +232,20 @@ export class Client {
         return answer.items;
     }
 
-    /** Returns `{mime, bytes}` for one representation of an entry. */
-    async fetch(entry, mime = null) {
-        const fields = mime === null ? {entry} : {entry, mime};
+    /**
+     * Returns `{mime, bytes}` for one representation of an entry.
+     *
+     * `transcode` lets the daemon produce the requested mime when the entry
+     * does not literally hold it — the one pair defined is `image/*` →
+     * `image/bmp`, which is the only image type the RDP clipboard channel
+     * relays. Anything it cannot produce still answers `no-such-mime`.
+     */
+    async fetch(entry, mime = null, transcode = false) {
+        const fields = {entry};
+        if (mime !== null)
+            fields.mime = mime;
+        if (transcode)
+            fields.transcode = true;
         const {frame, payload} = await this._request('fetch', fields);
         return {mime: frame.mime, bytes: payload};
     }

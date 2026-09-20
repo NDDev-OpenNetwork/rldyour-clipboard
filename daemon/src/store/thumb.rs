@@ -101,6 +101,52 @@ pub fn make(_content: &[u8]) -> Thumbnail {
     Thumbnail::default()
 }
 
+/// Re-encodes an image as a BMP file.
+///
+/// BMP is the one image format every downstream clipboard bridge understands
+/// natively — the RDP `CLIPRDR` channel carries `CF_DIB`, which xrdp's
+/// chansrv serves and requests only as `image/bmp`. A stored PNG is therefore
+/// unreachable to a remote desktop client until it is re-encoded, which is
+/// this function's whole purpose. The same pixel cap as thumbnailing applies:
+/// a hostile or broken payload simply produces nothing.
+#[cfg(feature = "thumbnails")]
+pub fn to_bmp(content: &[u8]) -> Option<Vec<u8>> {
+    use image::ImageReader;
+    use std::io::Cursor;
+
+    let reader = ImageReader::new(Cursor::new(content))
+        .with_guessed_format()
+        .ok()?;
+    let format = reader.format();
+    let Ok((width, height)) = reader.into_dimensions() else {
+        return None;
+    };
+    if u64::from(width) * u64::from(height) > MAX_PIXELS {
+        return None;
+    }
+
+    let mut reader = ImageReader::new(Cursor::new(content));
+    if let Some(format) = format {
+        reader.set_format(format);
+    }
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_PIXELS * 4);
+    reader.limits(limits);
+    let decoded = reader.decode().ok()?;
+
+    let mut bmp = Vec::new();
+    decoded
+        .write_to(&mut Cursor::new(&mut bmp), image::ImageFormat::Bmp)
+        .ok()?;
+    Some(bmp)
+}
+
+/// Without `thumbnails` the daemon cannot decode, so it cannot re-encode.
+#[cfg(not(feature = "thumbnails"))]
+pub fn to_bmp(_content: &[u8]) -> Option<Vec<u8>> {
+    None
+}
+
 /// A thumbnail as the pixels a compositor can upload directly.
 pub struct Pixels {
     pub rgba: Vec<u8>,
@@ -187,6 +233,20 @@ mod tests {
             .into_dimensions()
             .unwrap();
         assert_eq!((width, height), (32, 16), "never blown up");
+    }
+
+    #[test]
+    #[cfg(feature = "thumbnails")]
+    fn an_image_transcodes_to_a_real_bmp_file() {
+        let bmp = to_bmp(&png(24, 12)).expect("a decodable image transcodes");
+        assert_eq!(&bmp[..2], b"BM");
+        let (width, height) = image::ImageReader::new(std::io::Cursor::new(&bmp))
+            .with_guessed_format()
+            .unwrap()
+            .into_dimensions()
+            .unwrap();
+        assert_eq!((width, height), (24, 12));
+        assert!(to_bmp(b"not an image").is_none());
     }
 
     #[test]

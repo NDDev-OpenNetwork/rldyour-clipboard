@@ -189,9 +189,25 @@ class Client:
         )
         return answer["items"]
 
-    def fetch(self, entry: int, mime: Optional[str] = None) -> tuple[str, bytes]:
-        """Return one representation of an entry as ``(mime, content)``."""
-        answer = self._request("fetch", entry=entry, mime=mime)
+    def fetch(
+        self,
+        entry: int,
+        mime: Optional[str] = None,
+        transcode: bool = False,
+    ) -> tuple[str, bytes]:
+        """Return one representation of an entry as ``(mime, content)``.
+
+        With ``transcode`` the daemon may produce the requested mime when the
+        entry does not literally hold it — the one pair defined is
+        ``image/*`` → ``image/bmp``, which the RDP clipboard channel relays.
+        Anything it cannot produce still raises ``no-such-mime``.
+        """
+        answer = self._request(
+            "fetch",
+            entry=entry,
+            mime=mime,
+            transcode=transcode or None,
+        )
         return answer["mime"], self._read_payload(answer["bytes"])
 
     def thumb(self, entry: int) -> "Thumbnail":

@@ -8,6 +8,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 
+import {DaemonError} from './client.js';
 import {preferredMime} from './mimes.js';
 
 Gio._promisify(Gio.OutputStream.prototype, 'write_bytes_async', 'write_bytes_finish');
@@ -102,11 +103,33 @@ export class Restore {
      */
     async activate(entry, {mime = null, paste = true} = {}) {
         const wanted = mime ?? preferredMime(entry);
-        const {mime: served, bytes} = await this._client.fetch(entry.id, wanted);
-        await this._putOnClipboard(served, bytes);
+        const fetched = await this._fetchForRestore(entry, wanted, mime !== null);
+        await this._putOnClipboard(fetched.mime, fetched.bytes);
 
         if (paste && this._settings.get_boolean('paste-on-select'))
             this._paste();
+    }
+
+    /**
+     * Chooses the bytes to put on the clipboard.
+     *
+     * On X11 the clipboard owner may be asked by `xrdp-chansrv` — the RDP
+     * clipboard bridge — which understands `image/bmp` and no other image
+     * type. For an image entry the BMP form is therefore preferred, produced
+     * by the daemon's transcoder when the entry does not hold one; without it
+     * a remote client could not paste a restored picture at all. Every other
+     * case asks for the representation the mime rules pick.
+     */
+    async _fetchForRestore(entry, wanted, explicit) {
+        if (!explicit && entry.kind === 'image' && !Meta.is_wayland_compositor()) {
+            try {
+                return await this._client.fetch(entry.id, 'image/bmp', true);
+            } catch (error) {
+                if (!(error instanceof DaemonError && error.code === 'no-such-mime'))
+                    throw error;
+            }
+        }
+        return this._client.fetch(entry.id, wanted);
     }
 
     async _putOnClipboard(mime, bytes) {

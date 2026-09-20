@@ -306,6 +306,34 @@ impl Index {
         Ok(row)
     }
 
+    /// The best-ranked representation whose mime starts with `prefix`.
+    ///
+    /// `LIKE` metacharacters in the prefix are escaped, so a lookup only ever
+    /// matches a real prefix.
+    pub fn locate_prefixed(
+        &self,
+        entry: i64,
+        prefix: &str,
+    ) -> rusqlite::Result<Option<(String, String, u64)>> {
+        let pattern = format!(
+            "{}%",
+            prefix
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let row = self
+            .connection
+            .query_row(
+                "SELECT mime, digest, bytes FROM part WHERE entry = ?1
+                 AND mime LIKE ?2 ESCAPE '\\' ORDER BY rank, mime LIMIT 1",
+                params![entry, pattern],
+                read_location,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
     pub fn thumb(&self, entry: i64) -> rusqlite::Result<Option<(String, u64)>> {
         self.connection
             .query_row(

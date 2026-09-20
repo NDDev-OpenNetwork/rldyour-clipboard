@@ -173,9 +173,23 @@ impl Session {
                 }
             }
 
-            Request::Fetch { entry, mime, .. } => {
-                match self.store.open_part(entry, mime.as_deref()) {
-                    Ok(Some((mime, mut file, bytes))) => self.out.send_blob(
+            Request::Fetch {
+                entry,
+                mime,
+                transcode,
+                ..
+            } => {
+                let part = self.store.open_part(entry, mime.as_deref());
+                // A miss may still be served when the caller lets the daemon
+                // produce the representation — image/bmp is transcoded from
+                // whatever image the entry holds, which is the one image type
+                // the RDP clipboard channel relays.
+                let produced = match (&part, transcode, mime.as_deref()) {
+                    (Ok(None), true, Some(wanted)) => self.store.transcode(entry, wanted),
+                    _ => Ok(None),
+                };
+                match (part, produced) {
+                    (Ok(Some((mime, mut file, bytes))), _) => self.out.send_blob(
                         &Response::Blob {
                             req,
                             mime: mime.clone(),
@@ -184,7 +198,17 @@ impl Session {
                         &mut file,
                         bytes,
                     ),
-                    Ok(None) => {
+                    (_, Ok(Some((mime, content)))) => self.out.send_blob(
+                        &Response::Blob {
+                            req,
+                            mime,
+                            bytes: content.len() as u64,
+                        },
+                        &mut std::io::Cursor::new(&content),
+                        content.len() as u64,
+                    ),
+                    (Err(error), _) | (_, Err(error)) => self.failed(req, &error),
+                    (Ok(None), Ok(None)) => {
                         // Distinguishing the two tells a client whether to ask for
                         // a different representation or to forget the entry.
                         let (code, message) = match self.store.summary(entry) {
@@ -196,7 +220,6 @@ impl Session {
                         };
                         self.out.send(&Response::error(Some(req), code, message))
                     }
-                    Err(error) => self.failed(req, &error),
                 }
             }
 

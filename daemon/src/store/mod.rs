@@ -310,6 +310,35 @@ impl Store {
         Ok(Some((mime, self.blobs.open_read(&digest)?, bytes)))
     }
 
+    /// Produces a representation the entry does not literally hold.
+    ///
+    /// The only pair defined is `image/*` → `image/bmp`: the RDP clipboard
+    /// channel carries `CF_DIB`, which xrdp's chansrv serves and requests only
+    /// as `image/bmp`, so a stored PNG is unreachable to a remote desktop
+    /// client until it is re-encoded. The bytes are produced fresh for each
+    /// call — a fetch never writes back into the archive — and a build without
+    /// `thumbnails` answers `None`, which the caller turns into the ordinary
+    /// `no-such-mime`.
+    pub fn transcode(&self, entry: i64, mime: &str) -> Result<Option<(String, Vec<u8>)>> {
+        if !mime.eq_ignore_ascii_case("image/bmp") {
+            return Ok(None);
+        }
+        let located = {
+            let index = self.index.lock().expect("index lock");
+            index.locate_prefixed(entry, "image/")?
+        };
+        let Some((_, digest, bytes)) = located else {
+            return Ok(None);
+        };
+
+        let mut content = Vec::with_capacity(bytes as usize);
+        self.blobs
+            .open_read(&digest)?
+            .take(bytes)
+            .read_to_end(&mut content)?;
+        Ok(thumb::to_bmp(&content).map(|bmp| ("image/bmp".to_string(), bmp)))
+    }
+
     /// The thumbnail for an entry, decoded into pixels ready to upload.
     ///
     /// Stored as PNG and served as RGBA: a few kilobytes is the right thing to

@@ -85,6 +85,23 @@ def main() -> int:
         _, served = client.fetch(image_entry)
         check(served == picture, "the original image is served untouched")
 
+        # The RDP clipboard channel relays image/bmp and no other image type,
+        # so a fetch may ask the daemon to produce it by transcoding.
+        mime, converted = client.fetch(image_entry, "image/bmp", transcode=True)
+        check(mime == "image/bmp", "transcoding serves the mime asked for")
+        check(
+            converted[:2] == b"BM" and len(converted) > 54,
+            "the transcoded image is a real BMP file",
+        )
+        try:
+            client.fetch(entry, "text/x-nonesuch", transcode=True)
+            check(False, "a mime the daemon cannot produce is still an error")
+        except ProtocolError as error:
+            check(
+                error.code == "no-such-mime",
+                "untranscodable requests still answer no-such-mime",
+            )
+
         print("A payload far larger than any control frame")
         big = bytes((i * 7) % 256 for i in range(3_000_000))
         big_entry, _ = client.record([("application/octet-stream", big)])

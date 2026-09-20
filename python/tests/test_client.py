@@ -289,6 +289,33 @@ def test_a_source_that_fails_part_way_still_terminates_its_part():
         stub.close()
 
 
+def test_fetch_carries_transcode_only_when_asked():
+    content = b"BM" + bytes(12)
+    stub = StubDaemon([
+        HELLO,
+        frame({"ev": "blob", "req": 1, "mime": "image/bmp", "bytes": len(content)})
+        + content,
+        frame({"ev": "blob", "req": 2, "mime": "image/png", "bytes": 3}) + b"png",
+    ])
+    try:
+        with Client(path=stub.path) as client:
+            mime, read = client.fetch(7, "image/bmp", transcode=True)
+            client.fetch(7)
+        assert (mime, read) == ("image/bmp", content)
+
+        stub.wait_for(3)
+        fetches = [f for f in stub.received if f.get("op") == "fetch"]
+        assert fetches[0] == {
+            "op": "fetch", "req": 1, "entry": 7, "mime": "image/bmp",
+            "transcode": True,
+        }
+        # Unset means absent: a daemon that does not know the field must not
+        # see it, and the field must not ask for anything either.
+        assert fetches[1] == {"op": "fetch", "req": 2, "entry": 7}
+    finally:
+        stub.close()
+
+
 def test_optional_fields_left_unset_are_not_sent():
     stub = StubDaemon([HELLO, frame({"ev": "list", "req": 1, "items": []})])
     try:

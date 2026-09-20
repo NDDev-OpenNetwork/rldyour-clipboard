@@ -92,6 +92,12 @@ pub enum Request {
         entry: i64,
         #[serde(default)]
         mime: Option<String>,
+        /// Asks the daemon to produce the representation by transcoding when
+        /// the entry does not literally hold it. The only pair defined is
+        /// `image/*` → `image/bmp`, which the RDP clipboard channel relays.
+        /// Anything else still answers `no-such-mime`.
+        #[serde(default)]
+        transcode: bool,
     },
     Thumb {
         req: u64,
