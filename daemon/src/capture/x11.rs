@@ -288,6 +288,10 @@ fn convert(
 
 /// The next event before `deadline`, marking `changed` when the clipboard's
 /// owner moved on while we were still asking the previous owner for data.
+///
+/// Once it has, there is nothing left to wait out: the new owner will never
+/// answer the conversion the old one was asked for, so the read is abandoned
+/// immediately rather than when the deadline runs down.
 fn wait_event(
     connection: &RustConnection,
     clipboard: Atom,
@@ -295,6 +299,9 @@ fn wait_event(
     changed: &mut bool,
 ) -> Option<Event> {
     loop {
+        if *changed {
+            return None;
+        }
         match connection.poll_for_event() {
             Ok(Some(event)) => {
                 if let Event::XfixesSelectionNotify(notify) = &event {

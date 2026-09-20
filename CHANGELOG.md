@@ -44,7 +44,11 @@ First release.
 
 - The daemon watches `CLIPBOARD` itself wherever an X11 server is reachable,
   subscribing to `XFIXES` owner changes and reading every offered target —
-  plain and `INCR` transfers alike. This is what puts remote-desktop copies in
+  plain and `INCR` transfers alike. An owner change mid-read abandons the
+  transfer at once rather than waiting out its deadline, and a lost X
+  connection — an XRDP session restart replaces the server under the
+  session — is reconnected on a capped backoff instead of ending the watch.
+  This is what puts remote-desktop copies in
   the archive: under XRDP `xrdp-chansrv` owns the selection like any other X11
   client, so RDP text, `text/uri-list` files and `image/bmp` images are
   recorded with no GNOME component involved. A watching daemon stays resident

@@ -41,8 +41,9 @@ the script.
   streams bytes out and does nothing else. `MetaSelectionSourceMemory` serves
   exactly one mime (`g_strcmp0`), so Wayland restore is single-mime by design.
 - **X11/XRDP**: any client can watch `CLIPBOARD`; the daemon does it natively
-  (`x11rb` + XFIXES, INCR-aware, owner-change aborts mid-read). Restore goes
-  through `xclip` so every requested target is answered.
+  (`x11rb` + XFIXES, INCR-aware, owner-change aborts the pending read at once,
+  lost X connections reconnect on a capped backoff). Restore goes through
+  `xclip` so every requested target is answered.
 - **xrdp/cliprdr**: remote copies arrive as `UTF8_STRING`/`text/uri-list`/
   `x-special/gnome-copied-files`/`image/bmp`. Images out to RDP clients must
   be `image/bmp` — `fetch` with `transcode:true` produces it on demand from
