@@ -174,4 +174,16 @@ else
   fail "the unit writes %h/${unit_path} but the daemon opens somewhere else"
 fi
 
+echo "Favorites filter"
+# `pinned` is spelled out in three languages; a rename on one side silently
+# turns the favorites page into an unfiltered list on the others.
+rust_pinned="$(grep -c 'pinned' "${ROOT}/daemon/src/proto.rs")"
+js_pinned="$(grep -c 'pinned' "${ROOT}/extension/lib/client.js")"
+py_pinned="$(grep -c 'pinned' "${ROOT}/python/src/rldyour_clipboard/__init__.py")"
+if [ "${rust_pinned}" -gt 0 ] && [ "${js_pinned}" -gt 0 ] && [ "${py_pinned}" -gt 0 ]; then
+  pass "list's pinned filter exists in the daemon and both clients"
+else
+  fail "pinned wiring is partial: daemon ${rust_pinned}, extension ${js_pinned}, python ${py_pinned}"
+fi
+
 exit "${FAILED}"
