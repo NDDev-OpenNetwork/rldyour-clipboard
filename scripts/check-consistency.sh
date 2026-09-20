@@ -107,6 +107,19 @@ else
   fail "daemon ${rust_frame}, extension ${js_frame}, python ${py_frame}"
 fi
 
+echo "launchd agent"
+# The daemon asks launchd for a socket by name; the plist must offer that
+# same key and land it on the socket file every client opens.
+plist="${ROOT}/daemon/launchd/io.nddev.rldyour-clipboardd.plist"
+socket_key="$(grep -oP 'CString::new\("\K[^"]+' "${ROOT}/daemon/src/main.rs" | head -1)"
+if [ -f "${plist}" ] \
+    && grep -q "<key>${socket_key}</key>" "${plist}" \
+    && grep -q "/${rust_socket}</string>" "${plist}"; then
+  pass "the launchd agent serves '${socket_key}' at ${rust_socket}"
+else
+  fail "the launchd agent does not match the daemon's launch_activate_socket contract"
+fi
+
 echo "Archive directory"
 # The unit grants write access to exactly one path; the daemon must agree.
 unit_path="$(grep -oP 'ReadWritePaths=%h/\K.*' "${ROOT}/daemon/systemd/rldyour-clipboardd.service")"

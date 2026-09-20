@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  rldyour-clipboardd — launchd agent for macOS
+
+  Socket-activated: the daemon starts when a client first connects and exits
+  two minutes after the last one disconnects, exactly like the systemd unit
+  on Linux. The Sockets key must be "sock" — it is the name the daemon hands
+  to launch_activate_socket().
+
+  Install:
+
+    install -d ~/Library/Application\ Support/rldyour-clipboard ~/.local/bin
+    cp rldyour-clipboardd ~/.local/bin/
+    sed "s|@HOME@|${HOME}|g" io.nddev.rldyour-clipboardd.plist \
+        > ~/Library/LaunchAgents/io.nddev.rldyour-clipboardd.plist
+    launchctl bootstrap gui/"$(id -u)" \
+        ~/Library/LaunchAgents/io.nddev.rldyour-clipboardd.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+        "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.nddev.rldyour-clipboardd</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@HOME@/.local/bin/rldyour-clipboardd</string>
+    </array>
+
+    <!-- Never started for its own sake: only a socket connection asks for it. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>Sockets</key>
+    <dict>
+        <key>sock</key>
+        <dict>
+            <key>SockPathName</key>
+            <string>@HOME@/Library/Application Support/rldyour-clipboard/rldyour-clipboard.sock</string>
+            <!-- The archive is everything the user has copied; 0600, not the umask. -->
+            <key>SockPathMode</key>
+            <integer>384</integer>
+        </dict>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+</dict>
+</plist>

@@ -169,6 +169,39 @@ window, so it costs nothing between copies. Windows rebuilds a `.bmp` from
 `CF_DIB` and strips the `CF_HTML` header, so a screenshot and a rich-text copy
 arrive as the same mime types they would on Linux.
 
+### macOS — socket-activated under launchd
+
+`daemon/launchd/io.nddev.rldyour-clipboardd.plist` is the service manager
+piece; `launchd` starts the daemon on the first connection and it exits when
+idle, exactly like the systemd unit on Linux:
+
+```sh
+install -d ~/Library/Application\ Support/rldyour-clipboard ~/.local/bin \
+    ~/Library/LaunchAgents
+cargo build --release --locked --manifest-path daemon/Cargo.toml
+cp daemon/target/release/rldyour-clipboardd ~/.local/bin/
+sed "s|@HOME@|${HOME}|g" \
+    daemon/launchd/io.nddev.rldyour-clipboardd.plist \
+    > ~/Library/LaunchAgents/io.nddev.rldyour-clipboardd.plist
+launchctl bootstrap gui/"$(id -u)" \
+    ~/Library/LaunchAgents/io.nddev.rldyour-clipboardd.plist
+```
+
+### Windows — resident, started at sign-in
+
+Windows has no per-user socket activation, so the daemon binds its own socket
+under `%LOCALAPPDATA%` and stays resident; the Run key starts it at sign-in:
+
+```powershell
+cargo build --release --locked --manifest-path daemon/Cargo.toml
+copy daemon\target\release\rldyour-clipboardd.exe "$env:LOCALAPPDATA\rldyour-clipboard\"
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" `
+    /v rldyour-clipboardd /t REG_SZ /f `
+    /d "$env:LOCALAPPDATA\rldyour-clipboard\rldyour-clipboardd.exe"
+```
+
+Then either sign out and back in, or run the binary once by hand.
+
 ## Configuration
 
 The extension's preferences cover what most people change: whether to record at
