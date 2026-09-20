@@ -45,14 +45,14 @@ export class Capture {
         /** Set while this extension is writing the clipboard itself. */
         this._ours = null;
         /**
-         * Digest of the bytes a helper just put on the clipboard. Unlike
-         * `setOurs`, which matches a source by identity, this recognises a
-         * restore that arrives through a foreign owner — an xclip-owned X11
-         * selection raises `owner-changed` with no `MetaSelectionSource` to
-         * compare. One-shot: consumed by the first representation staged
-         * after it is set.
+         * Digests of the bytes restore helpers have put on the clipboard and
+         * whose ownership change has not been seen yet. Unlike `setOurs`,
+         * which matches a source by identity, this recognises a restore that
+         * arrives through a foreign owner — an xclip-owned X11 selection
+         * raises `owner-changed` with no `MetaSelectionSource` to compare.
+         * A list, not a slot: two quick restores each keep their own marker.
          */
-        this._expectOurs = null;
+        this._expectOurs = [];
         /** Serialises events so two quick copies cannot interleave. */
         this._queue = Promise.resolve();
         this._staged = 0;
@@ -76,15 +76,23 @@ export class Capture {
     /**
      * Remembers the bytes a restore helper is about to own the clipboard
      * with, so the ownership change it causes is not archived as a copy.
-     *
-     * @param {GLib.Bytes|null} bytes the restored bytes, or null to cancel
      */
     expectOurs(bytes) {
-        this._expectOurs = bytes === null ? null : {
-            size: bytes.get_size(),
-            sha256: GLib.compute_checksum_for_bytes(
-                GLib.ChecksumType.SHA256, bytes),
-        };
+        this._expectOurs.push(digestOf(bytes));
+        // A marker whose helper died before claiming is inert but should not
+        // accumulate: a restore is never queued more than a handful deep.
+        if (this._expectOurs.length > 8)
+            this._expectOurs.shift();
+    }
+
+    /**
+     * Forgets the bytes a failed helper never got to own — its marker, not
+     * another in-flight restore's.
+     */
+    unexpectOurs(bytes) {
+        const stale = digestOf(bytes);
+        this._expectOurs = this._expectOurs.filter(expected =>
+            expected.size !== stale.size || expected.sha256 !== stale.sha256);
     }
 
     _onOwnerChanged(type, source) {
@@ -187,7 +195,8 @@ export class Capture {
                     Gio.FileQueryInfoFlags.NONE, this._cancellable).get_size();
                 if (size === 0)
                     return false;
-                if (this._expectOurs && await this._consumeOurs(staging, size))
+                if (this._expectOurs.length > 0 &&
+                    await this._matchesOurs(staging, size))
                     return 'ours';
                 if (size > this._maximumBytes()) {
                     console.debug(
@@ -226,17 +235,22 @@ export class Capture {
     }
 
     /**
-     * Compares a staged representation against the expected restore bytes.
+     * Whether a staged representation is a restore helper's own bytes.
      *
-     * The expectation is consumed here — first call wins or clears it — so a
-     * real copy that arrives next is never mistaken for the helper's.
+     * Only a matching marker is consumed: a real copy staged while a helper
+     * claim is still pending must record normally, and it must not eat the
+     * marker that claim will need.
      */
-    async _consumeOurs(staging, size) {
-        const expected = this._expectOurs;
-        this._expectOurs = null;
-        if (expected.size !== size)
+    async _matchesOurs(staging, size) {
+        if (!this._expectOurs.some(expected => expected.size === size))
             return false;
-        return expected.sha256 === await fileDigest(staging, this._cancellable);
+        const sha256 = await fileDigest(staging, this._cancellable);
+        const matched = this._expectOurs.findIndex(expected =>
+            expected.size === size && expected.sha256 === sha256);
+        if (matched === -1)
+            return false;
+        this._expectOurs = this._expectOurs.filter((_, at) => at !== matched);
+        return true;
     }
 
     _stagingFile() {
@@ -256,8 +270,17 @@ export class Capture {
         this._ownerChangedId = 0;
         this._cancellable.cancel();
         this._ours = null;
-        this._expectOurs = null;
+        this._expectOurs = [];
     }
+}
+
+/** `{size, sha256}` of a byte string — how a restore is recognised later. */
+function digestOf(bytes) {
+    return {
+        size: bytes.get_size(),
+        sha256: GLib.compute_checksum_for_bytes(
+            GLib.ChecksumType.SHA256, bytes),
+    };
 }
 
 /** SHA-256 of a file, streamed so its size never enters memory. */

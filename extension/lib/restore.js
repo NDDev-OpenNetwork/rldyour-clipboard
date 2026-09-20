@@ -156,7 +156,9 @@ export class Restore {
             await proc.wait_check_async(this._cancellable);
             return true;
         } catch (error) {
-            this._capture?.expectOurs(null);
+            // The marker only matters if the claim is coming: a helper that
+            // died first must not leave one to be spent on a real copy.
+            this._capture?.unexpectOurs(bytes);
             if (!error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
                 console.debug(`rldyour-clipboard: xclip restore failed: ${error}`);
             proc?.force_exit();
