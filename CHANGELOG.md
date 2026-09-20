@@ -29,24 +29,40 @@ First release.
   zero-length one. This is what makes entry size unbounded in practice: a
   compositor hands a selection over as a stream and never states its length,
   and neither side ever holds a whole entry.
+- `fetch` accepts `transcode` for representations the daemon can produce on
+  demand — currently `image/bmp` from any stored image, the one image form an
+  RDP client can receive.
+- The socket sits beside the archive it serves: `RLDYOUR_CLIPBOARD_HOME`
+  relocates both on every platform and in every client.
 - Specified in `docs/protocol.md`, with a dependency-free Python client.
 
 ### Linux
 
+- The daemon watches `CLIPBOARD` itself wherever an X11 server is reachable,
+  subscribing to `XFIXES` owner changes and reading every offered target —
+  plain and `INCR` transfers alike. This is what puts remote-desktop copies in
+  the archive: under XRDP `xrdp-chansrv` owns the selection like any other X11
+  client, so RDP text, `text/uri-list` files and `image/bmp` images are
+  recorded with no GNOME component involved. A watching daemon stays resident
+  rather than idle-exiting.
 - A GNOME Shell extension for GNOME 46 through 50. Mutter implements neither
   `wlr-data-control` nor `ext-data-control-v1` and its maintainers have said it
   will not, so code inside the shell is the only thing that can see the
   selection; the extension is kept to exactly that and stores nothing, hashes
-  nothing and decodes no images.
+  nothing and decodes no images. Under Wayland it is the capture path; under
+  X11 it supplements the daemon's own watcher, and deduplication folds the two.
 - A tray icon in the same panel box as the AppIndicator icons, opening a picker
   with search, kind filters, thumbnails and paging. One click opens it — which
   a StatusNotifierItem cannot do, since the AppIndicator extension reserves
   `Activate` for a double click.
 - Choosing an entry puts it on the clipboard and types the paste shortcut into
   the window that had the keyboard, using Ctrl+Shift+V where Ctrl+V would be
-  wrong.
-- Socket-activated user service that exits when nobody has been connected for
-  two minutes.
+  wrong. On X11 the clipboard is owned through `xclip`, which answers every
+  paste target an application can request — the compositor's memory source can
+  offer only one mime — and image entries are served as `image/bmp` so an RDP
+  client on the other end of `cliprdr` can receive them.
+- Socket-activated user service; a daemon with nothing to watch exits two
+  minutes after the last client disconnects.
 
 ### macOS and Windows
 
@@ -55,6 +71,10 @@ First release.
 - Windows rebuilds a `.bmp` from `CF_DIB` and strips the `CF_HTML` header, so a
   screenshot and a rich-text copy arrive as the same mime types they would on
   Linux.
+- macOS installs socket-activated like Linux — `launchd` hands the daemon a
+  listening socket through the shipped `io.nddev.rldyour-clipboardd.plist`.
+  Windows has no per-user socket activation, so the daemon binds its own and
+  the Run key starts it at sign-in.
 - No tray client for either yet; both expose the same protocol.
 
 ### Thumbnails

@@ -4,8 +4,10 @@ A clipboard that remembers. One Rust daemon keeps everything you copy — text,
 images, file references, at any size — and a tray icon beside your other
 indicators opens a picker that puts a chosen entry back where you were typing.
 
-Linux has a GNOME Shell extension; macOS and Windows capture natively inside
-the daemon. Every platform exposes the same versioned local protocol.
+On Linux the daemon watches X11 itself and a GNOME Shell extension covers
+Wayland — the one place nothing else may see the selection. macOS and Windows
+capture natively inside the daemon. Every platform exposes the same versioned
+local protocol.
 
 ## Why it is two pieces
 
@@ -26,6 +28,16 @@ Everything else is the daemon, which restarts in milliseconds. Under Wayland
 the shell cannot be restarted without logging out, so any change to extension
 code costs a session; keeping the extension thin and stable, and putting
 everything that evolves behind a socket, is what makes the thing maintainable.
+
+On X11 the shell is not needed for capture at all: any client may watch
+`CLIPBOARD`, so the daemon subscribes to `XFIXES` selection events itself and
+reads the offered targets directly. That is also what makes remote desktops
+work — in an XRDP session `xrdp-chansrv` owns `CLIPBOARD` like any other X11
+client, and the daemon archives whatever the remote side copies without the
+extension being loaded, or GNOME being involved, at all. Where both run —
+a GNOME X11 session — the same copy may be seen twice; identical
+representation sets fold into one entry, and a set the shell proxies
+differently simply records a near-duplicate rather than losing the copy.
 
 ## Unlimited, and what that means
 
@@ -83,6 +95,24 @@ puts a *reference* on the clipboard — `text/uri-list` or
 and the row shows a file icon. Extracting a preview frame would need ffmpeg and
 is not done.
 
+## Remote desktops
+
+Anything copied on a remote machine reached over RDP lands in the archive. The
+RDP client sends its clipboard over the `cliprdr` channel, `xrdp-chansrv`
+claims `CLIPBOARD` on the X11 display and offers the remote formats — text as
+`UTF8_STRING` and friends, files as `text/uri-list` and
+`x-special/gnome-copied-files`, images as `image/bmp` — and the daemon's X11
+watcher records them exactly as it records a local copy. No configuration is
+needed beyond an xrdp build that relays the clipboard, and no GNOME component
+is involved.
+
+One asymmetry is worth knowing: xrdp's chansrv offers remote images to X11 —
+and requests local ones back — only as `image/bmp`, because the RDP channel
+carries `CF_DIB`. A stored PNG served as PNG is simply invisible to a remote
+client. Restoring an image entry on X11 therefore asks the daemon for a BMP
+rendering, which it produces on demand without touching what is stored;
+clients can ask for the same thing explicitly with `transcode` on `fetch`.
+
 ## Secrets are not archived
 
 An entry that advertises `x-kde-passwordManagerHint` (what KeePassXC, KWallet
@@ -108,9 +138,10 @@ own memory source can offer only one.
 This builds the daemon into `~/.local/bin`, installs a socket-activated user
 service, and copies the extension into place. Nothing needs root.
 
-The daemon starts on the first connection and exits two minutes after the last
-client disconnects, so it consumes nothing while the picker is closed. The
-archive is durable and survives it.
+The daemon starts on the first connection. Wherever it can watch the clipboard
+itself — every X11 or XRDP session, macOS, Windows — it stays resident to keep
+capturing; only a daemon with nothing to watch exits two minutes after the
+last client disconnects. The archive is durable and survives either way.
 
 Then load the extension. On X11 the shell reloads in place — press Alt+F2, type
 `r`, press Enter. Under Wayland there is no way to do that, so log out and back
@@ -143,18 +174,27 @@ would be wrong, which in a terminal it is.
 
 ### The one real limitation
 
-An entry is restored with **one** representation, not all of them.
+An entry is restored with **one** representation, not all of them — and on
+Wayland that is a hard constraint. `MetaSelectionSourceMemory` is the only
+selection source mutter exposes, it carries a single mime type, and it answers
+requests for exactly that type and nothing else. Offering several would need a
+custom `MetaSelectionSource`, which cannot be written in an extension: GJS
+refuses to implement a vfunc that takes a callback, and `read_async` is
+exactly that.
 
-`MetaSelectionSourceMemory` is the only selection source mutter exposes and it
-carries a single mime type. Offering several would need a custom
-`MetaSelectionSource`, which cannot be written in an extension: GJS refuses to
-implement a vfunc that takes a callback, and `read_async` is exactly that.
+On X11 the constraint does not apply, because the extension does not have to be
+the owner: restore hands the bytes to `xclip`, a real X11 client that answers
+whichever target the pasting application asks for — `UTF8_STRING`, `STRING`,
+`text/plain`, all of them — which is precisely what a Wayland memory source
+cannot do. `xclip` is a recommended dependency on X11 for that reason; without
+it restore falls back to the single-mime memory source.
 
 So the choice is made to fail safe. Images and file references are restored as
-themselves. Text is restored as `text/plain` even when the entry also holds
-HTML, because plain text pasted into a rich editor is merely unstyled, whereas
-HTML offered to a terminal or a search field matches nothing and pastes
-nothing at all. The archive keeps both either way.
+themselves — images as `image/bmp` where an RDP client may be listening.
+Text is restored as `text/plain` even when the entry also holds HTML, because
+plain text pasted into a rich editor is merely unstyled, whereas HTML offered
+to a terminal or a search field matches nothing and pastes nothing at all. The
+archive keeps both either way.
 
 ## Install on macOS and Windows
 

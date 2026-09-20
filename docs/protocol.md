@@ -207,6 +207,16 @@ truth: `mimes` is what actually decides what can be served.
 Omitting `mime` serves the entry's preferred representation and names it in the
 answer.
 
+`"transcode":true` asks the daemon to *produce* a representation the entry does
+not literally hold, when the requested mime is one it knows how to derive. The
+only defined pair is `image/bmp` from any stored `image/*`: the RDP clipboard
+channel carries `CF_DIB`, which xrdp's chansrv serves and requests only as BMP,
+so a remote desktop client cannot otherwise be given a stored PNG. The derived
+bytes are generated per request and never written back to the archive. When no
+conversion is defined for the requested mime, or the entry holds nothing it
+could be made from, the answer is the ordinary `no-such-mime`; a client that
+asked for `transcode` should fall back to a literal fetch.
+
 A thumbnail has its own answer, because it is pixels rather than a file:
 
 ```json
@@ -266,12 +276,14 @@ request only, not for the connection.
 
 ## Lifecycle
 
-Linux and macOS use socket activation, so the daemon may exit once no client
-has been connected for two minutes and is respawned by the next connection.
-Unlike a metrics daemon it holds durable state, so it commits every entry
-before it goes. Windows starts it at login and keeps it resident. A client that
-finds no listener should reconnect on a short backoff rather than treat it as
-an error.
+Linux and macOS use socket activation, so a daemon that is only answering
+requests may exit once no client has been connected for two minutes and is
+respawned by the next connection. A daemon that is itself watching the
+clipboard — natively on macOS and Windows, over `XFIXES` wherever an X11
+server is reachable, which includes every XRDP session — is in continuous use
+and stays resident. Unlike a metrics daemon it holds durable state, so it
+commits every entry before it goes. A client that finds no listener should
+reconnect on a short backoff rather than treat it as an error.
 
 ## Storage
 
