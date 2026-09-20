@@ -4,7 +4,11 @@ The daemon owns the clipboard archive. Clients speak a line-oriented control
 protocol over a per-user local socket, and any control frame may be followed by
 an unbounded binary payload. Nothing in the protocol caps the size of a
 clipboard entry: a frame states how many bytes follow, and both sides stream
-those bytes rather than holding them.
+those bytes rather than holding them. A capture client may still set a policy
+bound of its own — the GNOME extension declines a single representation larger
+than its `max-entry-megabytes` setting (512 MiB by default) rather than stall
+the compositor transferring it — but that refusal is the client's choice, not
+a limit the wire or the store impose.
 
 `v` is the protocol version, currently `1`, and is incremented only on an
 incompatible change. New fields may appear inside version 1.
@@ -259,7 +263,7 @@ request only, not for the connection.
 ## Lifecycle
 
 Linux and macOS use socket activation, so the daemon may exit once no client
-has been connected for thirty seconds and is respawned by the next connection.
+has been connected for two minutes and is respawned by the next connection.
 Unlike a metrics daemon it holds durable state, so it commits every entry
 before it goes. Windows starts it at login and keeps it resident. A client that
 finds no listener should reconnect on a short backoff rather than treat it as
@@ -285,3 +289,12 @@ blob store exceeds the configured budget, the daemon evicts whole entries,
 oldest first, skipping pinned ones, until it is under budget again. A single
 representation larger than the budget is refused with `too-large` rather than
 evicting the entire archive to hold it.
+
+The index runs in WAL mode with `synchronous=NORMAL`. A committed entry
+survives the daemon exiting or crashing; what it does not promise is survival
+of the last commits across a power cut, since they are not fsynced on every
+transaction. Corruption is not a possible outcome of that trade — the WAL is
+still written and replayed correctly — and blobs an interrupted commit left
+unreferenced are swept at startup, so nothing leaks. Clipboard history is a
+workload where losing the newest second of copies to a power failure is cheap;
+paying an fsync per copy would be the wrong side of the bargain.

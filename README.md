@@ -43,6 +43,11 @@ extensions generally pass content through the shell as a byte array, which is
 why they cap what they keep — a popular one stops at four megabytes for
 images. Here the bytes never enter the shell's heap at all.
 
+The one bound that remains is policy, not plumbing: the extension declines a
+single representation larger than `max-entry-megabytes` — 512 MiB by default,
+adjustable in preferences — because even a streamed transfer occupies the
+compositor for its duration. The daemon and the wire impose no such limit.
+
 The count of entries is unlimited too. What is rationed is disk:
 
 | | |
