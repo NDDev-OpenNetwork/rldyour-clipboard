@@ -107,8 +107,16 @@ if rust_cap != js_cap:
     print(f"  \033[31mFAIL\033[0m representation cap is {rust_cap} in the daemon, {js_cap} in the extension")
     ok = False
 
+# A bare atom survives recordable() only by being ranked: the daemon's
+# RANKED_BARE must be exactly the ranked names that carry no slash.
+rust_bare = block(rust, "const RANKED_BARE", '"')
+js_bare = {name for name in re.findall(r"^\s*'([^']+)':\s*\d+,", js, re.M) if '/' not in name}
+if rust_bare != js_bare:
+    print(f"  \033[31mFAIL\033[0m ranked bare atoms differ: daemon {sorted(rust_bare)}, extension {sorted(js_bare)}")
+    ok = False
+
 if ok:
-    print(f"  \033[32mok\033[0m   {len(rust_targets)} protocol targets and the cap of {rust_cap} agree")
+    print(f"  \033[32mok\033[0m   {len(rust_targets)} protocol targets, {len(rust_bare)} bare atoms and the cap of {rust_cap} agree")
 sys.exit(0 if ok else 1)
 PY
 

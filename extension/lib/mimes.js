@@ -137,7 +137,7 @@ export function recordable(offered) {
         // type; archiving it would record protocol noise as content.
         if (!key.includes('/') && RANK[key] === undefined)
             continue;
-        wanted.push(mime);
+        wanted.push(mime.trim());
     }
 
     wanted.sort((a, b) => rank(a) - rank(b));
