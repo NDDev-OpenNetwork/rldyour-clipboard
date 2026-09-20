@@ -49,6 +49,11 @@ the script.
   any stored `image/*` (never persisted).
 - **Secrets**: entries advertising password-manager/transient hints are
   dropped before bytes are stored — checked at capture and again in `commit`.
+- **Favorites = `entry.pinned`**: one durable flag is the whole model. Pinned
+  rows are skipped by eviction and `clear`, so the favorites list survives
+  restarts and reboots with the archive. `list` takes `pinned: bool` to page
+  favorites alone; `stats` adds a `pinned` count. Picker tabs: Recent
+  (`pinned:false`, last 10 first) vs Favorites (`pinned:true`, PAGE-sized).
 - **Lifecycle**: socket-activated daemon stays resident while it can watch the
   clipboard itself; it idle-exits (2 min) only when nothing is capturing.
 - `RLDYOUR_CLIPBOARD_HOME` relocates archive **and** socket together on every

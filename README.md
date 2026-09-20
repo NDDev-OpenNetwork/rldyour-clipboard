@@ -156,21 +156,30 @@ copied is your data, and deleting it is a separate, deliberate act.
 
 ## Using it
 
-Click the clipboard icon in the tray, or press **Super+V**.
+Click the clipboard icon in the tray, or press **Super+V**. The picker has two
+pages: **Recent**, the live stream of the newest copies, and **Favorites**, a
+durable store for anything worth keeping — prompts, snippets, images, file
+references. Starring a row moves it to Favorites, where budget eviction and
+`clear` can never reach it; both pages page further results in on scroll and
+accept the kind filters and search.
 
 | | |
 |---|---|
-| Type | searches the whole archive, narrowing as you go |
+| Type | searches the current page, narrowing as you go |
 | Up / Down | move through the list |
 | Enter | paste the selected entry |
 | Shift+Enter | put it on the clipboard without pasting |
 | Escape | clear the search, then close |
 | Click a row | paste it |
-| Star | pin, so the budget never evicts it |
+| Star | move the entry to Favorites, kept past restarts and eviction |
 
 Choosing an entry puts it on the clipboard and types the paste shortcut into
 the window that had the keyboard a moment ago — Ctrl+Shift+V where Ctrl+V
 would be wrong, which in a terminal it is.
+
+Favorites are also the prompt store for scripts and models: the Python client
+lists them with `Client.favorites()` or `rldyour-clipboard list --favorites`,
+and `get` writes one back to stdout for piping.
 
 ### The one real limitation
 

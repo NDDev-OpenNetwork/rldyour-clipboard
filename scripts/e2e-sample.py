@@ -147,7 +147,23 @@ def main() -> int:
         client.pin(entry, True)
         listed = client.list(limit=50)
         check(listed[0]["id"] == entry, "a pinned entry sorts first")
+
+        starred = client.favorites()
+        check(
+            any(e["id"] == entry for e in starred),
+            "the favorites list holds the starred entry",
+        )
+        check(
+            all(e["id"] != entry for e in client.list(limit=50, pinned=False)),
+            "favorites stay out of the unpinned stream",
+        )
+        check(client.stats()["pinned"] >= 1, "stats counts favorites")
         client.pin(entry, False)
+        check(
+            all(e["id"] != entry for e in client.favorites()),
+            "unpinning removes the entry from favorites",
+        )
+
         client.remove(big_entry)
         try:
             client.fetch(big_entry)

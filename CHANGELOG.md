@@ -32,6 +32,8 @@ First release.
 - `fetch` accepts `transcode` for representations the daemon can produce on
   demand — currently `image/bmp` from any stored image, the one image form an
   RDP client can receive.
+- `list` accepts a `pinned` filter, so clients can page the favorites list on
+  its own; `stats` reports how many entries are pinned.
 - The socket sits beside the archive it serves: `RLDYOUR_CLIPBOARD_HOME`
   relocates both on every platform and in every client.
 - Specified in `docs/protocol.md`, with a dependency-free Python client.
@@ -55,6 +57,11 @@ First release.
   with search, kind filters, thumbnails and paging. One click opens it — which
   a StatusNotifierItem cannot do, since the AppIndicator extension reserves
   `Activate` for a double click.
+- The picker has two pages: Recent shows the live stream of the newest copies;
+  Favorites holds starred entries — the durable store for prompts, snippets and
+  media that eviction and `clear` never touch, paged and searchable like the
+  stream. The Python client reaches it with `Client.favorites()` and
+  `rldyour-clipboard list --favorites`.
 - Choosing an entry puts it on the clipboard and types the paste shortcut into
   the window that had the keyboard, using Ctrl+Shift+V where Ctrl+V would be
   wrong. On X11 the clipboard is owned through `xclip`, which answers every

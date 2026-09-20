@@ -159,7 +159,7 @@ that closes with drafts open aborts them.
 ## Browsing
 
 ```json
-{"op":"list","req":5,"limit":50,"before":91,"query":"rebase","kind":"text"}
+{"op":"list","req":5,"limit":50,"before":91,"query":"rebase","kind":"text","pinned":true}
 ```
 
 | Field | Meaning |
@@ -168,6 +168,7 @@ that closes with drafts open aborts them.
 | `before` | Return only entries older than this id, for paging |
 | `query` | Full-text match over text representations and file names; omitted means everything |
 | `kind` | Restrict to one kind; omitted means every kind |
+| `pinned` | `true` lists only favorites, `false` only unpinned entries; omitted lists everything |
 
 The answer carries entry summaries, newest first, pinned entries before the
 rest:
@@ -189,12 +190,17 @@ rest:
 | `preview` | string\|null | Short single-line text preview, already truncated |
 | `width`/`height` | int\|null | Pixel size, images only |
 | `thumb` | bool | Whether a thumbnail can be fetched |
-| `pinned` | bool | Pinned entries are never evicted |
+| `pinned` | bool | Favorites are never evicted and survive `clear` |
 | `source` | string\|null | The application hint recorded at capture |
 | `at` | int | Unix seconds of the most recent copy |
 
 `kind` is a presentation hint derived at commit, never a second source of
 truth: `mimes` is what actually decides what can be served.
+
+Pinned entries are the favorites list — the durable store for prompts,
+snippets and media kept past the live stream. They live in the same archive,
+are excluded from budget eviction and `clear`, and so survive daemon
+restarts and reboots like everything else on disk.
 
 ## Serving an entry back
 
@@ -247,7 +253,8 @@ A `fetch` for a representation an entry does not hold answers the same way.
 ```
 
 `clear` removes everything that is not pinned. `stats` answers with the same
-shape as the `hello` acknowledgement. The others answer `{"ev":"ok","req":N}`.
+shape as the `hello` acknowledgement plus a `pinned` count of favorites.
+The others answer `{"ev":"ok","req":N}`.
 
 ## Broadcasts
 
