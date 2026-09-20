@@ -222,42 +222,46 @@ impl Index {
         before: Option<i64>,
         query: Option<&str>,
         only: Option<Kind>,
+        pinned: Option<bool>,
     ) -> rusqlite::Result<Vec<Summary>> {
         let limit = limit.clamp(1, MAX_LIMIT);
         let matching = query.map(fts_query).filter(|text| !text.is_empty());
 
         // Built by branch rather than by string concatenation so every value
-        // stays a bound parameter.
+        // stays a bound parameter. `?N IS NULL OR pinned = ?N` is how an
+        // absent filter keeps meaning "all".
         let mut summaries = match (&matching, only) {
             (None, None) => self.select(
                 "SELECT id, kind, bytes, preview, width, height, thumb, pinned, source, at
                  FROM entry
-                 WHERE (?1 IS NULL OR id < ?1)
+                 WHERE (?1 IS NULL OR id < ?1) AND (?3 IS NULL OR pinned = ?3)
                  ORDER BY pinned DESC, at DESC, id DESC LIMIT ?2",
-                params![before, limit],
+                params![before, limit, pinned],
             )?,
             (None, Some(kind)) => self.select(
                 "SELECT id, kind, bytes, preview, width, height, thumb, pinned, source, at
                  FROM entry
-                 WHERE (?1 IS NULL OR id < ?1) AND kind = ?3
+                 WHERE (?1 IS NULL OR id < ?1) AND kind = ?3 AND (?4 IS NULL OR pinned = ?4)
                  ORDER BY pinned DESC, at DESC, id DESC LIMIT ?2",
-                params![before, limit, kind.as_str()],
+                params![before, limit, kind.as_str(), pinned],
             )?,
             (Some(text), None) => self.select(
                 "SELECT e.id, e.kind, e.bytes, e.preview, e.width, e.height, e.thumb,
                         e.pinned, e.source, e.at
                  FROM entry e JOIN entry_fts f ON f.rowid = e.id
                  WHERE f.body MATCH ?3 AND (?1 IS NULL OR e.id < ?1)
+                       AND (?4 IS NULL OR e.pinned = ?4)
                  ORDER BY e.pinned DESC, e.at DESC, e.id DESC LIMIT ?2",
-                params![before, limit, text],
+                params![before, limit, text, pinned],
             )?,
             (Some(text), Some(kind)) => self.select(
                 "SELECT e.id, e.kind, e.bytes, e.preview, e.width, e.height, e.thumb,
                         e.pinned, e.source, e.at
                  FROM entry e JOIN entry_fts f ON f.rowid = e.id
                  WHERE f.body MATCH ?3 AND (?1 IS NULL OR e.id < ?1) AND e.kind = ?4
+                       AND (?5 IS NULL OR e.pinned = ?5)
                  ORDER BY e.pinned DESC, e.at DESC, e.id DESC LIMIT ?2",
-                params![before, limit, text, kind.as_str()],
+                params![before, limit, text, kind.as_str(), pinned],
             )?,
         };
 
@@ -421,6 +425,15 @@ impl Index {
     pub fn entries(&self) -> rusqlite::Result<i64> {
         self.connection
             .query_row("SELECT COUNT(*) FROM entry", [], |row| row.get(0))
+    }
+
+    /// How many entries are pinned — the favourites that eviction never
+    /// touches.
+    pub fn pinned(&self) -> rusqlite::Result<i64> {
+        self.connection
+            .query_row("SELECT COUNT(*) FROM entry WHERE pinned = 1", [], |row| {
+                row.get(0)
+            })
     }
 
     pub fn bytes(&self) -> rusqlite::Result<i64> {
@@ -614,8 +627,46 @@ mod tests {
             .unwrap();
 
         index.set_pinned(old, true).unwrap();
-        let listed = index.list(10, None, None, None).unwrap();
+        let listed = index.list(10, None, None, None, None).unwrap();
         assert_eq!(listed[0].id, old, "a pinned entry outranks a newer one");
+    }
+
+    #[test]
+    fn the_pinned_filter_splits_favourites_from_the_rest() {
+        let (mut index, _dir) = index();
+        let plain = index
+            .insert("a", &[part("text/plain", "aa", 1)], &text_facts("a"), 100)
+            .unwrap();
+        let starred = index
+            .insert("b", &[part("text/plain", "bb", 1)], &text_facts("b"), 200)
+            .unwrap();
+        index.set_pinned(starred, true).unwrap();
+
+        let only_starred = index.list(10, None, None, None, Some(true)).unwrap();
+        assert_eq!(only_starred.len(), 1);
+        assert_eq!(only_starred[0].id, starred);
+
+        let only_plain = index.list(10, None, None, None, Some(false)).unwrap();
+        assert_eq!(only_plain.len(), 1);
+        assert_eq!(only_plain[0].id, plain);
+
+        assert_eq!(index.list(10, None, None, None, None).unwrap().len(), 2);
+        assert_eq!(index.pinned().unwrap(), 1);
+        // The filter composes with search rather than replacing it.
+        assert_eq!(
+            index
+                .list(10, None, Some("b"), None, Some(true))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            index
+                .list(10, None, Some("b"), None, Some(false))
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[test]
@@ -638,18 +689,30 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(index.list(10, None, Some("rebase"), None).unwrap().len(), 1);
-        // A half-typed word still matches, which is what makes search feel live.
-        assert_eq!(index.list(10, None, Some("reb"), None).unwrap().len(), 1);
         assert_eq!(
             index
-                .list(10, None, Some("git rebase"), None)
+                .list(10, None, Some("rebase"), None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        // A half-typed word still matches, which is what makes search feel live.
+        assert_eq!(
+            index.list(10, None, Some("reb"), None, None).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            index
+                .list(10, None, Some("git rebase"), None, None)
                 .unwrap()
                 .len(),
             1
         );
         assert_eq!(
-            index.list(10, None, Some("nonesuch"), None).unwrap().len(),
+            index
+                .list(10, None, Some("nonesuch"), None, None)
+                .unwrap()
+                .len(),
             0
         );
     }
@@ -669,7 +732,7 @@ mod tests {
         // Each of these is FTS5 syntax that would be a parse error unquoted.
         for query in ["\"", "*", "a OR", "NEAR(", "^", "quoted\""] {
             assert!(
-                index.list(10, None, Some(query), None).is_ok(),
+                index.list(10, None, Some(query), None, None).is_ok(),
                 "query {query:?} must not fail"
             );
         }
@@ -771,7 +834,7 @@ mod tests {
         index
             .insert("a", &[part("text/plain", "aa", 1)], &text_facts("x"), 100)
             .unwrap();
-        assert!(index.list(u32::MAX, None, None, None).unwrap().len() <= MAX_LIMIT as usize);
+        assert!(index.list(u32::MAX, None, None, None, None).unwrap().len() <= MAX_LIMIT as usize);
     }
 
     #[test]

@@ -86,6 +86,10 @@ pub enum Request {
         query: Option<String>,
         #[serde(default)]
         kind: Option<String>,
+        /// `true` lists only pinned (favourite) entries, `false` only the
+        /// unpinned ones; absent lists everything.
+        #[serde(default)]
+        pinned: Option<bool>,
     },
     Fetch {
         req: u64,
@@ -207,6 +211,8 @@ pub enum Response {
     Stats {
         req: u64,
         entries: i64,
+        /// How many of them are pinned — the favourites.
+        pinned: i64,
         bytes: i64,
         budget: i64,
     },

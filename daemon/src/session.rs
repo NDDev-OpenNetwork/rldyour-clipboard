@@ -63,7 +63,7 @@ impl Session {
         match proto::decode(&line) {
             Ok(Request::Hello { v, role }) if v == proto::PROTOCOL_VERSION => {
                 self.role = role;
-                let (entries, bytes) = self.store.stats().unwrap_or((0, 0));
+                let (entries, _pinned, bytes) = self.store.stats().unwrap_or((0, 0, 0));
                 self.out.send(&Response::Hello {
                     v: proto::PROTOCOL_VERSION,
                     entries,
@@ -161,12 +161,13 @@ impl Session {
                 before,
                 query,
                 kind,
+                pinned,
                 ..
             } => {
                 let only = kind.as_deref().and_then(Kind::parse);
                 match self
                     .store
-                    .list(limit.unwrap_or(50), before, query.as_deref(), only)
+                    .list(limit.unwrap_or(50), before, query.as_deref(), only, pinned)
                 {
                     Ok(items) => self.out.send(&Response::List { req, items }),
                     Err(error) => self.failed(req, &error),
@@ -284,9 +285,10 @@ impl Session {
             },
 
             Request::Stats { .. } => match self.store.stats() {
-                Ok((entries, bytes)) => self.out.send(&Response::Stats {
+                Ok((entries, pinned, bytes)) => self.out.send(&Response::Stats {
                     req,
                     entries,
+                    pinned,
                     bytes,
                     budget: self.store.budget(),
                 }),
@@ -904,5 +906,47 @@ mod tests {
         let mut payload = vec![0u8; 12];
         io::Read::read_exact(&mut peer.reader, &mut payload).unwrap();
         assert_eq!(payload, b"<b>hello</b>");
+    }
+
+    #[test]
+    fn list_splits_favourites_and_stats_counts_them() {
+        let mut peer = Peer::open(1024 * 1024);
+        peer.send(r#"{"op":"begin","req":1}"#, b"");
+        peer.answer();
+        peer.send(
+            r#"{"op":"part","req":2,"draft":1,"mime":"text/plain","bytes":5}"#,
+            b"plain",
+        );
+        peer.answer();
+        peer.send(r#"{"op":"commit","req":3,"draft":1}"#, b"");
+        peer.answer();
+
+        peer.send(r#"{"op":"begin","req":4}"#, b"");
+        peer.answer();
+        peer.send(
+            r#"{"op":"part","req":5,"draft":2,"mime":"text/plain","bytes":9}"#,
+            b"favourite",
+        );
+        peer.answer();
+        peer.send(r#"{"op":"commit","req":6,"draft":2}"#, b"");
+        peer.answer();
+
+        peer.send(r#"{"op":"pin","req":7,"entry":2,"pinned":true}"#, b"");
+        assert!(peer.answer().contains(r#""ev":"ok""#));
+
+        peer.send(r#"{"op":"list","req":8,"pinned":true}"#, b"");
+        let starred = peer.answer();
+        assert!(starred.contains(r#""id":2"#), "{starred}");
+        assert!(!starred.contains(r#""id":1"#), "{starred}");
+
+        peer.send(r#"{"op":"list","req":9,"pinned":false}"#, b"");
+        let plain = peer.answer();
+        assert!(plain.contains(r#""id":1"#), "{plain}");
+        assert!(!plain.contains(r#""id":2"#), "{plain}");
+
+        peer.send(r#"{"op":"stats","req":10}"#, b"");
+        let stats = peer.answer();
+        assert!(stats.contains(r#""entries":2"#), "{stats}");
+        assert!(stats.contains(r#""pinned":1"#), "{stats}");
     }
 }

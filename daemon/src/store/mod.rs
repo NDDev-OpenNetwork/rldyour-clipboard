@@ -283,9 +283,10 @@ impl Store {
         before: Option<i64>,
         query: Option<&str>,
         only: Option<kind::Kind>,
+        pinned: Option<bool>,
     ) -> Result<Vec<Summary>> {
         let index = self.index.lock().expect("index lock");
-        Ok(index.list(limit, before, query, only)?)
+        Ok(index.list(limit, before, query, only, pinned)?)
     }
 
     pub fn summary(&self, entry: i64) -> Result<Option<Summary>> {
@@ -392,9 +393,11 @@ impl Store {
         Ok(())
     }
 
-    pub fn stats(&self) -> Result<(i64, i64)> {
+    /// `(entries, pinned, bytes)` — what the archive holds and how much of it
+    /// is marked favourite.
+    pub fn stats(&self) -> Result<(i64, i64, i64)> {
         let index = self.index.lock().expect("index lock");
-        Ok((index.entries()?, index.bytes()?))
+        Ok((index.entries()?, index.pinned()?, index.bytes()?))
     }
 
     /// Deletes blob files the index no longer references.
@@ -648,7 +651,7 @@ mod tests {
         let outcome = store.accept("image/png", &mut io::Cursor::new(&big), big.len() as u64);
         assert!(matches!(outcome, Err(StoreError::TooLarge)));
         // Refusing it left the archive untouched rather than emptying it.
-        assert_eq!(store.stats().unwrap(), (0, 0));
+        assert_eq!(store.stats().unwrap(), (0, 0, 0));
     }
 
     #[test]
@@ -669,7 +672,7 @@ mod tests {
         assert_eq!(last.evicted, vec![entries[0].entry]);
         assert!(store.summary(entries[0].entry).unwrap().is_none());
         assert!(store.summary(entries[2].entry).unwrap().is_some());
-        assert!(store.stats().unwrap().1 <= 2048);
+        assert!(store.stats().unwrap().2 <= 2048);
     }
 
     #[test]
@@ -687,11 +690,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            store.list(10, None, Some("runbook"), None).unwrap().len(),
+            store
+                .list(10, None, Some("runbook"), None, None)
+                .unwrap()
+                .len(),
             1
         );
         assert_eq!(
-            store.list(10, None, Some("missing"), None).unwrap().len(),
+            store
+                .list(10, None, Some("missing"), None, None)
+                .unwrap()
+                .len(),
             0
         );
     }
@@ -712,6 +721,28 @@ mod tests {
 
         assert_eq!(store.stats().unwrap().0, 1);
         assert!(store.summary(kept.entry).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_favorite_survives_the_store_reopening() {
+        // Reboots and daemon restarts both look like this to the archive.
+        let dir = TempDir::new();
+        let store = Store::open(dir.path(), DEFAULT_BUDGET).unwrap();
+        let kept = store
+            .commit(&[accept(&store, "text/plain", b"prompt")], None, 100)
+            .unwrap()
+            .unwrap();
+        store
+            .commit(&[accept(&store, "text/plain", b"stream")], None, 200)
+            .unwrap();
+        store.set_pinned(kept.entry, true).unwrap();
+        drop(store);
+
+        let store = Store::open(dir.path(), DEFAULT_BUDGET).unwrap();
+        let favorites = store.list(10, None, None, None, Some(true)).unwrap();
+        assert_eq!(favorites.len(), 1);
+        assert_eq!(favorites[0].id, kept.entry);
+        assert_eq!(store.stats().unwrap().1, 1);
     }
 
     #[test]
