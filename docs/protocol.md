@@ -17,9 +17,13 @@ incompatible change. New fields may appear inside version 1.
 
 | Platform | Socket |
 |---|---|
+| Any | `$RLDYOUR_CLIPBOARD_HOME/rldyour-clipboard.sock` when the override is set |
 | Linux | `$XDG_RUNTIME_DIR/rldyour-clipboard.sock` (normally `/run/user/<uid>/rldyour-clipboard.sock`) |
 | macOS | `~/Library/Application Support/rldyour-clipboard/rldyour-clipboard.sock` |
 | Windows | `%LOCALAPPDATA%\rldyour-clipboard\rldyour-clipboard.sock` |
+
+The override relocates archive and socket together — the socket belongs beside
+the archive it serves — and every client resolves it the same way.
 
 The socket is mode `0600`: only the owning user may connect. The archive holds
 everything the user has copied, so the socket is the whole security boundary

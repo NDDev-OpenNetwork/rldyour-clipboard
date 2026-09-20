@@ -16,7 +16,12 @@ from pathlib import Path
 
 import pytest
 
-from rldyour_clipboard import Client, ProtocolError, TruncatedPart
+from rldyour_clipboard import (
+    Client,
+    ProtocolError,
+    TruncatedPart,
+    socket_path,
+)
 
 
 class StubDaemon:
@@ -88,6 +93,13 @@ def daemon(request):
     stub = StubDaemon(request.param if hasattr(request, "param") else [HELLO])
     yield stub
     stub.close()
+
+
+def test_the_home_override_relocates_the_socket(monkeypatch, tmp_path):
+    # The daemon resolves the same rule, so the socket follows the archive
+    # it serves wherever the variable points — on every platform.
+    monkeypatch.setenv("RLDYOUR_CLIPBOARD_HOME", str(tmp_path))
+    assert socket_path() == tmp_path / "rldyour-clipboard.sock"
 
 
 def test_greets_with_the_protocol_version_and_role():

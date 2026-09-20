@@ -73,7 +73,14 @@ class ProtocolError(RuntimeError):
 
 
 def socket_path() -> Path:
-    """Return the daemon socket used by the current platform."""
+    """Return the daemon socket used by the current platform.
+
+    ``RLDYOUR_CLIPBOARD_HOME`` relocates archive and socket together on every
+    platform — the daemon resolves the same way — so the override wins first.
+    """
+    override = os.environ.get("RLDYOUR_CLIPBOARD_HOME")
+    if override:
+        return Path(override) / "rldyour-clipboard.sock"
     if sys.platform == "darwin":
         return (
             Path.home()

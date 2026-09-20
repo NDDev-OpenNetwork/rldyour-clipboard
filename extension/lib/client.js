@@ -79,7 +79,11 @@ export class Client {
     }
 
     async _connect() {
-        const path = GLib.build_filenamev([GLib.get_user_runtime_dir(), SOCKET_NAME]);
+        // RLDYOUR_CLIPBOARD_HOME relocates archive and socket together on
+        // every platform; the runtime directory is the production default.
+        const root = GLib.getenv('RLDYOUR_CLIPBOARD_HOME')
+            ?? GLib.get_user_runtime_dir();
+        const path = GLib.build_filenamev([root, SOCKET_NAME]);
         const connection = await new Gio.SocketClient().connect_async(
             new Gio.UnixSocketAddress({path}), this._cancellable);
 
