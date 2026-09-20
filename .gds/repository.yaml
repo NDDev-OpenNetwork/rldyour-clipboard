@@ -1,0 +1,42 @@
+schema_version: 1
+repository:
+  id: repo_01M2ZRZKYT8N03P0A9E9GPVC7C
+  display_name: rldyour-clipboard
+  roles:
+  - project
+  lifecycle: active
+provider:
+  type: github
+  installation: installation:github-opennetwork
+  owner: NDDev-OpenNetwork
+  repository_id: 1378441391
+  name: rldyour-clipboard
+classification:
+  portfolios:
+  - portfolio:opennetwork-projects
+  visibility_contract: public
+  data_classification: public
+product:
+  purpose: >-
+    Local-first clipboard archive: a Rust daemon recording clipboard history
+    with a searchable store, Python client library, and a desktop extension
+    for browsing and re-picking entries.
+policy:
+  profiles:
+  - repository-default
+  - organization-default
+  rollout_ring: standard
+git:
+  default_branch: main
+  integration: pull-request
+  branch_model: task-branches
+  handoff_pr: preferred
+  cleanup: merged-only
+agent:
+  context_profile: project-default
+  generated_agents: false
+  serena:
+    enabled: true
+    provenance_required: true
+release:
+  mode: none
