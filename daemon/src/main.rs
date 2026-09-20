@@ -112,9 +112,11 @@ fn run() -> std::io::Result<()> {
 
     // Where the daemon can see the clipboard itself, it does: natively on
     // macOS and Windows, and on Linux whenever an X11 server is reachable —
-    // which is every XRDP session too. A GNOME Wayland session is the one
-    // place no client may read the selection, so there the shell extension
-    // feeds the daemon over the socket instead.
+    // which is every XRDP session too, and every Wayland session running
+    // XWayland, whose bridged selection mirrors Wayland copies (a filtered
+    // view of them; the extension still sees the full set). A Wayland
+    // session without XWayland is the one place nothing outside the shell
+    // may read the selection, so there the extension alone feeds the daemon.
     let capturing = capture::spawn(Arc::clone(&store), Arc::clone(&watchers));
     if capturing {
         eprintln!("rldyour-clipboardd: watching the clipboard natively");

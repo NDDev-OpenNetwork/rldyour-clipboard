@@ -35,10 +35,34 @@ const CONVERT_TIMEOUT: Duration = Duration::from_secs(5);
 /// gets its own budget and a stalled owner — not a big paste — is what ends it.
 const INCR_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Watches `CLIPBOARD` until the X connection dies.
+/// How long to wait before reconnecting when the X connection dies, and the
+/// ceiling the wait grows to.
+///
+/// The server going away is not a reason to stop watching forever: an XRDP
+/// session restart replaces the X server under the session, and a watcher
+/// that gave up would leave every later remote copy unrecorded. A failed
+/// connect costs a syscall, so retrying indefinitely costs a line a minute.
+const RECONNECT_MIN: Duration = Duration::from_secs(1);
+const RECONNECT_MAX: Duration = Duration::from_secs(60);
+
+/// Watches `CLIPBOARD`, reconnecting when the X connection drops.
 pub fn watch(recorder: &Recorder) {
-    if let Err(error) = run(recorder) {
-        eprintln!("rldyour-clipboardd: x11 clipboard watch stopped: {error}");
+    let mut backoff = RECONNECT_MIN;
+    loop {
+        match run(recorder) {
+            Err(error) => {
+                eprintln!(
+                    "rldyour-clipboardd: x11 clipboard watch stopped: {error}; \
+                     retrying in {}s",
+                    backoff.as_secs()
+                );
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(RECONNECT_MAX);
+            }
+            // `run` only returns on error today; the arm keeps that honest if
+            // it ever gains a way to stop cleanly.
+            Ok(()) => return,
+        }
     }
 }
 
@@ -187,13 +211,12 @@ fn read_one(
         .ok()?;
 
     if first.type_ != atoms.incr {
-        // A small answer lands whole: delete the property as it is read.
-        let reply = connection
-            .get_property(true, window, atoms.data, AtomEnum::ANY, 0, u32::MAX / 4)
-            .ok()?
-            .reply()
-            .ok()?;
-        return Some(reply.value);
+        // The first read already holds the whole answer — the bytes would
+        // only cross the wire twice if it were fetched again. What the ICCCM
+        // still wants is the property deleted once the requestor has it.
+        connection.delete_property(window, atoms.data).ok()?;
+        connection.flush().ok()?;
+        return Some(first.value);
     }
 
     // INCR: deleting the property is the signal the owner waits for before
