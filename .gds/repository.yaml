@@ -13,7 +13,7 @@ provider:
   name: rldyour-clipboard
 classification:
   portfolios:
-  - portfolio:opennetwork-projects
+  - "portfolio:nddev-opennetwork"
   visibility_contract: public
   data_classification: public
 product:
