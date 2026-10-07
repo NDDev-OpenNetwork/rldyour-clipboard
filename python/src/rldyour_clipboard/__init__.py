@@ -95,6 +95,13 @@ def socket_path() -> Path:
     return Path(runtime) / "rldyour-clipboard.sock"
 
 
+class EntryPage(list[Summary]):
+    """A normal list with a pagination flag, including frame-trimmed pages."""
+    def __init__(self, items: list[Summary], more: bool) -> None:
+        super().__init__(items)
+        self.more = more
+
+
 class Client:
     """A connection to the local daemon.
 
@@ -193,11 +200,11 @@ class Client:
         query: Optional[str] = None,
         kind: Optional[str] = None,
         pinned: Optional[bool] = None,
-    ) -> list[Summary]:
+    ) -> EntryPage:
         answer = self._request(
             "list", limit=limit, before=before, query=query, kind=kind, pinned=pinned
         )
-        return answer["items"]
+        return EntryPage(answer["items"], answer.get("more", len(answer["items"]) >= limit))
 
     def favorites(
         self,
@@ -205,7 +212,7 @@ class Client:
         before: Optional[int] = None,
         query: Optional[str] = None,
         kind: Optional[str] = None,
-    ) -> list[Summary]:
+    ) -> EntryPage:
         """Return only starred entries — the durable prompt/snippet store."""
         return self.list(limit=limit, before=before, query=query, kind=kind, pinned=True)
 

@@ -378,3 +378,19 @@ def test_streaming_restore_handles_short_destination_writes_and_keeps_framing():
             assert client.stats()["entries"] == 1
     finally:
         stub.close()
+
+
+def test_frame_trimmed_pages_preserve_the_more_flag_without_breaking_list_api():
+    stub = StubDaemon([
+        HELLO,
+        frame({"ev": "list", "req": 1, "items": [{"id": 9}], "more": True}),
+        frame({"ev": "list", "req": 2, "items": [{"id": 8}], "more": False}),
+    ])
+    try:
+        with Client(path=stub.path, watch=False) as client:
+            page = client.list(limit=500)
+            assert isinstance(page, list) and page == [{"id": 9}] and page.more
+            last = client.list(limit=500, before=page[-1]["id"])
+            assert last == [{"id": 8}] and not last.more
+    finally:
+        stub.close()

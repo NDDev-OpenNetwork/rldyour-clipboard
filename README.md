@@ -135,7 +135,9 @@ rldyour-clipboard unpin 42
 rldyour-clipboard get 42 > restored.png
 ```
 
-`get` streams output; the Python `Client.fetch()` convenience method returns
+Python `list()`/`favorites()` return list-compatible pages with a `.more` flag;
+follow it and use the last entry ID as `before`, because frame-size bounds can
+trim a page below the requested limit. `get` streams output; the Python `Client.fetch()` convenience method returns
 bytes, while `fetch_to()` streams to a destination. `clear` keeps pins;
 explicit `remove` can delete a pinned record.
 
