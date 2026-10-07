@@ -39,4 +39,8 @@ else
   FAILED=1
 fi
 
+if [[ -n "${1:-}" && "$1" != "v${crate}" ]]; then
+  report "FAIL" "tag $1 does not match v${crate}"
+  FAILED=1
+fi
 exit "${FAILED}"

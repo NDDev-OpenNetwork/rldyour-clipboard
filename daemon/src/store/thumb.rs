@@ -16,10 +16,10 @@ pub const EDGE: u32 = 256;
 /// Refuse to decode an image with more pixels than this.
 ///
 /// A decoded frame costs four bytes a pixel whatever the encoded size, so a
-/// small file can still describe an enormous allocation. Forty megapixels is
-/// past any screenshot and well short of a problem.
+/// small file can still describe an enormous allocation. Sixteen megapixels
+/// covers normal screenshots while bounding the one active decoder to 64 MiB.
 #[cfg(feature = "thumbnails")]
-const MAX_PIXELS: u64 = 40_000_000;
+const MAX_PIXELS: u64 = 16_000_000;
 
 /// What could be learned about an image representation.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -110,7 +110,12 @@ pub fn make(_content: &[u8]) -> Thumbnail {
 /// this function's whole purpose. The same pixel cap as thumbnailing applies:
 /// a hostile or broken payload simply produces nothing.
 #[cfg(feature = "thumbnails")]
-pub fn to_bmp(content: &[u8]) -> Option<Vec<u8>> {
+pub fn write_bmp(content: &[u8], output: &mut (impl std::io::Write + std::io::Seek)) -> bool {
+    transcode_bmp(content, output).is_some()
+}
+
+#[cfg(feature = "thumbnails")]
+fn transcode_bmp(content: &[u8], output: &mut (impl std::io::Write + std::io::Seek)) -> Option<()> {
     use image::ImageReader;
     use std::io::Cursor;
 
@@ -134,17 +139,20 @@ pub fn to_bmp(content: &[u8]) -> Option<Vec<u8>> {
     reader.limits(limits);
     let decoded = reader.decode().ok()?;
 
-    let mut bmp = Vec::new();
-    decoded
-        .write_to(&mut Cursor::new(&mut bmp), image::ImageFormat::Bmp)
-        .ok()?;
-    Some(bmp)
+    decoded.write_to(output, image::ImageFormat::Bmp).ok()?;
+    Some(())
 }
 
 /// Without `thumbnails` the daemon cannot decode, so it cannot re-encode.
 #[cfg(not(feature = "thumbnails"))]
-pub fn to_bmp(_content: &[u8]) -> Option<Vec<u8>> {
-    None
+pub fn write_bmp(_content: &[u8], _output: &mut (impl std::io::Write + std::io::Seek)) -> bool {
+    false
+}
+
+#[cfg(all(test, feature = "thumbnails"))]
+fn to_bmp(content: &[u8]) -> Option<Vec<u8>> {
+    let mut output = std::io::Cursor::new(Vec::new());
+    write_bmp(content, &mut output).then(|| output.into_inner())
 }
 
 /// A thumbnail as the pixels a compositor can upload directly.
@@ -171,7 +179,15 @@ impl Pixels {
 /// forty decodes on the compositor's thread.
 #[cfg(feature = "thumbnails")]
 pub fn decode(png: &[u8]) -> Option<Pixels> {
-    let decoded = image::load_from_memory(png).ok()?;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(png))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(EDGE);
+    limits.max_image_height = Some(EDGE);
+    limits.max_alloc = Some(u64::from(EDGE) * u64::from(EDGE) * 16);
+    reader.limits(limits);
+    let decoded = reader.decode().ok()?;
     let rgba = decoded.to_rgba8();
     let (width, height) = (rgba.width(), rgba.height());
     Some(Pixels {

@@ -340,3 +340,57 @@ def test_favorites_ask_for_pinned_entries():
         assert listing == {"op": "list", "req": 1, "limit": 50, "pinned": True}
     finally:
         stub.close()
+
+
+def test_query_clients_can_skip_broadcasts():
+    stub = StubDaemon([HELLO])
+    try:
+        with Client(path=stub.path, watch=False):
+            pass
+        stub.wait_for(1)
+        assert stub.received[0]["watch"] is False
+    finally:
+        stub.close()
+
+
+def test_streaming_restore_handles_short_destination_writes_and_keeps_framing():
+    content = bytes(range(256)) * 300  # Crosses the 64 KiB streaming boundary.
+    stub = StubDaemon([
+        HELLO,
+        frame({"ev": "blob", "req": 1, "mime": "image/png", "bytes": len(content)}) + content,
+        frame({"ev": "stats", "req": 2, "entries": 1}),
+    ])
+    class ShortWriter:
+        def __init__(self):
+            self.content = bytearray()
+            self.largest = 0
+        def write(self, chunk):
+            self.largest = max(self.largest, len(chunk))
+            count = min(len(chunk), 997)
+            self.content.extend(chunk[:count])
+            return count
+    try:
+        with Client(path=stub.path, watch=False) as client:
+            sink = ShortWriter()
+            assert client.fetch_to(1, sink) == ("image/png", len(content))
+            assert sink.content == content
+            assert sink.largest <= 65536
+            assert client.stats()["entries"] == 1
+    finally:
+        stub.close()
+
+
+def test_frame_trimmed_pages_preserve_the_more_flag_without_breaking_list_api():
+    stub = StubDaemon([
+        HELLO,
+        frame({"ev": "list", "req": 1, "items": [{"id": 9}], "more": True}),
+        frame({"ev": "list", "req": 2, "items": [{"id": 8}], "more": False}),
+    ])
+    try:
+        with Client(path=stub.path, watch=False) as client:
+            page = client.list(limit=500)
+            assert isinstance(page, list) and page == [{"id": 9}] and page.more
+            last = client.list(limit=500, before=page[-1]["id"])
+            assert last == [{"id": 8}] and not last.more
+    finally:
+        stub.close()

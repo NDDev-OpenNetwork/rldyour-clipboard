@@ -1,8 +1,8 @@
 [package]
 name = "rldyour-clipboardd"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 license = "AGPL-3.0-or-later"
 description = "Clipboard archive daemon with unbounded entry size for Linux, macOS, and Windows"
 repository = "https://github.com/NDDev-OpenNetwork/rldyour-clipboard"
@@ -17,11 +17,14 @@ repository = "https://github.com/NDDev-OpenNetwork/rldyour-clipboard"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.37", features = ["bundled"] }
-sha2 = "0.10"
+rusqlite = { version = "0.40", features = ["bundled"] }
+sha2 = "0.11"
 image = { version = "0.25", optional = true, default-features = false, features = [
   "png", "jpeg", "gif", "bmp", "webp",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # X11 is the only Linux display protocol where an unprivileged client may
@@ -31,13 +34,13 @@ x11rb = { version = "0.14", features = ["xfixes"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSArray", "NSData"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSArray", "NSEnumerator", "NSData"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 uds_windows = "1.2.1"
 windows-sys = { version = "0.61", features = [
-  "Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Memory",
+  "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_DataExchange", "Win32_System_Memory",
   "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader",
 ] }
 

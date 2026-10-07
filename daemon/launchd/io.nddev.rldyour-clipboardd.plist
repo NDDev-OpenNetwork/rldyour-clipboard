@@ -2,9 +2,9 @@
 <!--
   rldyour-clipboardd — launchd agent for macOS
 
-  Socket-activated: the daemon starts when a client first connects and exits
-  two minutes after the last one disconnects, exactly like the systemd unit
-  on Linux. The Sockets key must be "sock" — it is the name the daemon hands
+  Starts at login to capture new copies even before the history UI opens.
+  Native capture keeps the process resident; socket activation also supplies
+  the listener. The Sockets key must be "sock" — it is the name the daemon hands
   to launch_activate_socket().
 
   Install:
@@ -28,9 +28,14 @@
         <string>@HOME@/.local/bin/rldyour-clipboardd</string>
     </array>
 
-    <!-- Never started for its own sake: only a socket connection asks for it. -->
+    <!-- Capture must start at login, before the first history query. -->
     <key>RunAtLoad</key>
-    <false/>
+    <true/>
+    <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+    <key>Umask</key><integer>63</integer>
+    <key>EnvironmentVariables</key><dict>
+        <key>RLDYOUR_CLIPBOARD_RETENTION_DAYS</key><string>7</string>
+    </dict>
 
     <key>Sockets</key>
     <dict>

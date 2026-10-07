@@ -16,9 +16,9 @@ import os
 import socket
 import sys
 from pathlib import Path
-from typing import Any, Iterator, NamedTuple, Optional, Sequence, TypedDict
+from typing import Any, BinaryIO, Iterator, NamedTuple, Optional, Sequence, TypedDict
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 PROTOCOL_VERSION = 1
 
@@ -95,6 +95,13 @@ def socket_path() -> Path:
     return Path(runtime) / "rldyour-clipboard.sock"
 
 
+class EntryPage(list[Summary]):
+    """A normal list with a pagination flag, including frame-trimmed pages."""
+    def __init__(self, items: list[Summary], more: bool) -> None:
+        super().__init__(items)
+        self.more = more
+
+
 class Client:
     """A connection to the local daemon.
 
@@ -103,9 +110,10 @@ class Client:
     connection drops.
     """
 
-    def __init__(self, path: Optional[Path] = None, role: str = "ui") -> None:
+    def __init__(self, path: Optional[Path] = None, role: str = "ui", watch: bool = True) -> None:
         self._path = path or socket_path()
         self._role = role
+        self._watch = watch
         self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._socket.connect(str(self._path))
         self._reader = self._socket.makefile("rb")
@@ -138,16 +146,24 @@ class Client:
             raise ProtocolError("closed", "the daemon closed the connection")
         if not line.endswith(b"\n"):
             raise ProtocolError("bad-frame", "control frame was too long")
-        return json.loads(line)
+        value = json.loads(line)
+        if not isinstance(value, dict):
+            raise ProtocolError("bad-frame", "control frame must be an object")
+        return value
 
     def _read_payload(self, count: int) -> bytes:
+        if type(count) is not int or count < 0 or count > (1 << 63) - 1:
+            raise ProtocolError("bad-frame", "invalid payload length")
         payload = self._reader.read(count)
         if payload is None or len(payload) != count:
             raise ProtocolError("bad-frame", "payload ended early")
         return payload
 
     def _greet(self) -> dict[str, Any]:
-        self._send({"op": "hello", "v": PROTOCOL_VERSION, "role": self._role})
+        hello = {"op": "hello", "v": PROTOCOL_VERSION, "role": self._role}
+        if not self._watch:
+            hello["watch"] = False
+        self._send(hello)
         answer = self._read_frame()
         if answer.get("ev") == "error":
             raise ProtocolError(answer.get("code", "error"), answer.get("message", ""))
@@ -184,11 +200,11 @@ class Client:
         query: Optional[str] = None,
         kind: Optional[str] = None,
         pinned: Optional[bool] = None,
-    ) -> list[Summary]:
+    ) -> EntryPage:
         answer = self._request(
             "list", limit=limit, before=before, query=query, kind=kind, pinned=pinned
         )
-        return answer["items"]
+        return EntryPage(answer["items"], answer.get("more", len(answer["items"]) >= limit))
 
     def favorites(
         self,
@@ -196,7 +212,7 @@ class Client:
         before: Optional[int] = None,
         query: Optional[str] = None,
         kind: Optional[str] = None,
-    ) -> list[Summary]:
+    ) -> EntryPage:
         """Return only starred entries — the durable prompt/snippet store."""
         return self.list(limit=limit, before=before, query=query, kind=kind, pinned=True)
 
@@ -220,6 +236,27 @@ class Client:
             transcode=transcode or None,
         )
         return answer["mime"], self._read_payload(answer["bytes"])
+
+    def fetch_to(self, entry: int, destination: BinaryIO, mime: Optional[str] = None,
+                 transcode: bool = False) -> tuple[str, int]:
+        """Stream a representation in 64 KiB chunks without buffering it whole."""
+        answer = self._request("fetch", entry=entry, mime=mime, transcode=transcode or None)
+        count = answer["bytes"]
+        if type(count) is not int or count < 0 or count > (1 << 63) - 1:
+            raise ProtocolError("bad-frame", "invalid payload length")
+        remaining = count
+        while remaining:
+            data = self._reader.read(min(remaining, 64 * 1024))
+            if not data:
+                raise ProtocolError("bad-frame", "payload ended early")
+            offset = 0
+            while offset < len(data):
+                written = destination.write(memoryview(data)[offset:])
+                if written is None or written <= 0:
+                    raise OSError("destination stopped accepting clipboard bytes")
+                offset += written
+            remaining -= len(data)
+        return answer["mime"], count
 
     def thumb(self, entry: int) -> "Thumbnail":
         """Return an entry's thumbnail as decoded RGBA pixels.
@@ -388,7 +425,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     command = arguments.command or "list"
 
     try:
-        with Client() as client:
+        with Client(watch=False) as client:
             if command == "list":
                 for entry in client.list(
                     limit=arguments.limit,
@@ -403,8 +440,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         f"  {_human(entry['bytes']):>9}  {preview}"
                     )
             elif command == "get":
-                _, content = client.fetch(arguments.entry, arguments.mime)
-                sys.stdout.buffer.write(content)
+                client.fetch_to(arguments.entry, sys.stdout.buffer, arguments.mime)
             elif command == "pin":
                 client.pin(arguments.entry, True)
             elif command == "unpin":

@@ -241,7 +241,7 @@ export const Picker = GObject.registerClass({
             if (generation === this._generation) {
                 // A short page is the end of the archive, so no further
                 // request is made however far the list is scrolled.
-                if (items.length < this._tab.pageSize)
+                if (!(items.more ?? items.length === this._tab.pageSize))
                     this._exhausted = true;
                 for (const entry of items)
                     this._addRow(entry);
@@ -464,7 +464,8 @@ export const Picker = GObject.registerClass({
         this._summary.text =
             `${stats.entries} ${stats.entries === 1 ? 'entry' : 'entries'} · ` +
             `${stats.pinned} ${stats.pinned === 1 ? 'favorite' : 'favorites'} · ` +
-            `${size(stats.bytes)} of ${budget}`;
+            `${size(stats.bytes)} of ${budget}` +
+            (stats.retention_days ? ` · recent: ${stats.retention_days} days` : '');
     }
 
     _report(error) {

@@ -5,6 +5,7 @@
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import {FrameReader, sliceBytes} from './framing.js';
 
 const SOCKET_NAME = 'rldyour-clipboard.sock';
 const PROTOCOL_VERSION = 1;
@@ -20,17 +21,6 @@ const RECONNECT_MAX_SECONDS = 30;
 Gio._promisify(Gio.SocketClient.prototype, 'connect_async');
 Gio._promisify(Gio.InputStream.prototype, 'read_bytes_async');
 Gio._promisify(Gio.OutputStream.prototype, 'write_bytes_async');
-
-// `read_line_async` has two finish functions — one returning bytes and one
-// returning a string — and `Gio._promisify` is a no-op once something else has
-// already wrapped the method. Whichever variant another extension or the shell
-// itself asked for first is therefore the one this code gets, so it asks for
-// the byte form and decodes explicitly. Relying on the string form appeared to
-// work only because `JSON.parse` calls `toString()` on a Uint8Array, which GJS
-// warns about and has said it will stop honouring.
-Gio._promisify(Gio.DataInputStream.prototype, 'read_line_async', 'read_line_finish');
-
-const DECODER = new TextDecoder();
 
 /**
  * Speaks the daemon's protocol from inside the shell process.
@@ -65,6 +55,7 @@ export class Client {
         this._backoff = RECONNECT_MIN_SECONDS;
         this._stopped = false;
         this._hello = null;
+        this._writing = Promise.resolve();
 
         this._connect().catch(() => this._retry());
     }
@@ -87,14 +78,13 @@ export class Client {
         const connection = await new Gio.SocketClient().connect_async(
             new Gio.UnixSocketAddress({path}), this._cancellable);
 
+        if (this._stopped) {
+            connection.close_async(GLib.PRIORITY_DEFAULT, null, null);
+            return;
+        }
         this._connection = connection;
         this._output = connection.get_output_stream();
-        this._input = new Gio.DataInputStream({
-            baseStream: connection.get_input_stream(),
-            // The daemon may hand over a blob of any size; the buffer only has
-            // to be large enough for a control frame.
-            bufferSize: MAX_FRAME,
-        });
+        this._input = new FrameReader(connection.get_input_stream(), this._cancellable);
 
         // The greeting is positional: it is the one answer without a request
         // id, so it is read here rather than through the dispatch loop.
@@ -106,15 +96,16 @@ export class Client {
         this._hello = greeting;
         this._backoff = RECONNECT_MIN_SECONDS;
         this._onState(true);
-        this._dispatch().catch(() => this._retry());
+        this._dispatch(connection, this._input).catch(() => this._retry(connection));
     }
 
     /** Reads answers and broadcasts until the connection ends. */
-    async _dispatch() {
+    async _dispatch(connection, input) {
         for (;;) {
-            const frame = await this._readFrame();
+            const frame = await input.frame();
+            if (connection !== this._connection || this._stopped) return;
             if (frame === null) {
-                this._retry();
+                this._retry(connection);
                 return;
             }
 
@@ -122,7 +113,8 @@ export class Client {
             // request that asked for it.
             let payload = null;
             if (frame.ev === 'blob' || frame.ev === 'thumb')
-                payload = await this._readPayload(frame.bytes);
+                payload = await input.payload(frame.bytes);
+            if (connection !== this._connection || this._stopped) return;
 
             if (frame.req === undefined) {
                 this._onEvent(frame);
@@ -141,65 +133,46 @@ export class Client {
         }
     }
 
-    async _readFrame() {
-        const [line] = await this._input.read_line_async(GLib.PRIORITY_DEFAULT, this._cancellable);
-        // A null line is a clean close, which is how the daemon says it is
-        // going away because nobody needed it.
-        if (line === null)
-            return null;
-        if (line.length > MAX_FRAME)
-            throw new Error('the peer sent a control frame longer than the protocol defines');
+    _readFrame() { return this._input.frame(); }
+    _readPayload(count) { return this._input.payload(count); }
 
-        // Bytes or a string, depending on which finish function won the
-        // promisify race described above. Both are handled rather than
-        // assumed.
-        const text = typeof line === 'string' ? line : DECODER.decode(line);
-
-        try {
-            return JSON.parse(text);
-        } catch {
-            throw new Error('the peer sent something that is not a control frame');
+    async _writeAll(bytes) {
+        const output = this._output;
+        const connection = this._connection;
+        if (output === null) throw new Error('not connected');
+        let offset = 0;
+        while (offset < bytes.get_size()) {
+            const remaining = sliceBytes(bytes, offset, bytes.get_size() - offset);
+            if (connection !== this._connection || this._stopped) throw new Error('clipboard connection changed');
+            const written = await output.write_bytes_async(remaining,
+                GLib.PRIORITY_DEFAULT, this._cancellable);
+            if (written <= 0)
+                throw new Error('clipboard socket stopped accepting bytes');
+            offset += written;
         }
     }
 
-    async _readPayload(count) {
-        const parts = [];
-        let remaining = count;
-
-        // read_bytes_async is allowed to return short, so a payload is read to
-        // its declared length rather than in one call.
-        while (remaining > 0) {
-            const chunk = await this._input.read_bytes_async(
-                Math.min(remaining, CHUNK), GLib.PRIORITY_DEFAULT, this._cancellable);
-            const size = chunk.get_size();
-            if (size === 0)
-                throw new Error('the payload ended early');
-            parts.push(chunk);
-            remaining -= size;
-        }
-
-        if (parts.length === 1)
-            return parts[0];
-
-        const joined = new Uint8Array(count);
-        let at = 0;
-        for (const part of parts) {
-            joined.set(part.toArray(), at);
-            at += part.get_size();
-        }
-        return new GLib.Bytes(joined);
+    _enqueue(write) {
+        const connection = this._connection;
+        const operation = this._writing.then(() => {
+            if (connection !== this._connection || this._stopped)
+                throw new Error('clipboard connection changed');
+            return write();
+        });
+        this._writing = operation.catch(() => {});
+        return operation;
     }
 
     async _write(frame, payload = null) {
         if (this._output === null)
             throw new Error('not connected to the daemon');
 
-        const line = `${JSON.stringify(frame)}\n`;
-        await this._output.write_bytes_async(
-            new GLib.Bytes(line), GLib.PRIORITY_DEFAULT, this._cancellable);
+        const line = new GLib.Bytes(`${JSON.stringify(frame)}\n`);
+        if (line.get_size() > MAX_FRAME)
+            throw new Error('outgoing clipboard control frame is too large');
+        await this._writeAll(line);
         if (payload !== null) {
-            await this._output.write_bytes_async(
-                payload, GLib.PRIORITY_DEFAULT, this._cancellable);
+            await this._writeAll(payload);
         }
     }
 
@@ -210,7 +183,7 @@ export class Client {
             this._pending.set(req, {resolve, reject});
         });
         try {
-            await this._write({op, req, ...fields});
+            await this._enqueue(() => this._write({op, req, ...fields}));
         } catch (error) {
             this._pending.delete(req);
             throw error;
@@ -231,6 +204,7 @@ export class Client {
         if (pinned !== null)
             fields.pinned = pinned;
         const answer = await this._request('list', fields);
+        Object.defineProperty(answer.items, 'more', {value: answer.more ?? answer.items.length === limit});
         return answer.items;
     }
 
@@ -309,14 +283,20 @@ export class Client {
      * which is the whole reason the shell can carry an entry of any size.
      */
     async part(draft, mime, stream) {
+        const connection = this._connection;
+        const write = (frame, payload = null) => {
+            if (connection !== this._connection) throw new Error('clipboard connection changed');
+            return this._write(frame, payload);
+        };
         const req = this._nextReq++;
         const answer = new Promise((resolve, reject) => {
             this._pending.set(req, {resolve, reject});
         });
 
+        await this._enqueue(async () => {
         try {
             // No `bytes`: the daemon reads chunks until a zero-length one.
-            await this._write({op: 'part', req, draft, mime});
+            await write({op: 'part', req, draft, mime});
         } catch (error) {
             this._pending.delete(req);
             throw error;
@@ -329,28 +309,29 @@ export class Client {
                 const size = chunk.get_size();
                 if (size === 0)
                     break;
-                await this._write({op: 'chunk', bytes: size}, chunk);
+                await write({op: 'chunk', bytes: size}, chunk);
             }
         } catch (error) {
             this._pending.delete(req);
             // The daemon is reading chunks, and every frame after this part is
             // on the far side of the terminator. Leaving it out would strand
             // the connection, so it is sent even though the part is now short.
-            await this._write({op: 'chunk', bytes: 0}).catch(() => {});
+            await write({op: 'chunk', bytes: 0}).catch(() => {});
             // Rethrown so the caller aborts the draft: what reached the daemon
             // is a truncated representation, and committing it would archive a
             // half a picture as though it were whole.
             throw new TruncatedPart(mime, error);
         }
 
-        await this._write({op: 'chunk', bytes: 0});
+        await write({op: 'chunk', bytes: 0});
+        });
         return answer;
     }
 
     // -- lifecycle -------------------------------------------------------
 
-    _retry() {
-        if (this._stopped)
+    _retry(connection = this._connection) {
+        if (this._stopped || connection !== this._connection)
             return;
 
         this._teardown();

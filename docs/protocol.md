@@ -1,14 +1,12 @@
 # rldyour-clipboard protocol
 
 The daemon owns the clipboard archive. Clients speak a line-oriented control
-protocol over a per-user local socket, and any control frame may be followed by
-an unbounded binary payload. Nothing in the protocol caps the size of a
-clipboard entry: a frame states how many bytes follow, and both sides stream
-those bytes rather than holding them. A capture client may still set a policy
-bound of its own — the GNOME extension declines a single representation larger
-than its `max-entry-megabytes` setting (512 MiB by default) rather than stall
-the compositor transferring it — but that refusal is the client's choice, not
-a limit the wire or the store impose.
+protocol over a per-user local socket. Binary payloads use declared lengths or
+chunked transfer, independently of the 64 KiB JSON control-frame ceiling. The
+daemon streams blob I/O; clients may apply policy bounds (GNOME restore caps a
+representation at 512 MiB, capture uses `max-entry-megabytes`). Native clipboard
+APIs and image decoders may materialize data; a convenience client API may also
+return a whole payload rather than a stream.
 
 `v` is the protocol version, currently `1`, and is incremented only on an
 incompatible change. New fields may appear inside version 1.
@@ -43,10 +41,9 @@ after the last payload byte.
 {"op":"commit","req":5,"draft":7}\n
 ```
 
-A payload is opaque. It is never base64-encoded, never escaped, and never
-buffered whole by either side — the capture client splices it in from the
-compositor and the daemon splices it out to a blob file. That is what makes
-"unlimited" a property of the design rather than a promise.
+A payload is opaque. It is never base64-encoded, never escaped, and is streamed between the transport and daemon blob files. GNOME capture
+forwards chunks, Python `fetch_to` streams output, and native UI restores use
+private temporary files for large payloads.
 
 Responses to a connection's requests are emitted in the order the requests
 arrived, so a client may correlate by `req` or by position. Payloads are
@@ -59,7 +56,7 @@ The first frame a client sends states the protocol version it speaks and the
 role it takes:
 
 ```json
-{"op":"hello","v":1,"role":"ui"}
+{"op":"hello","v":1,"role":"ui","watch":false}
 ```
 
 | Role | Meaning |
@@ -68,10 +65,14 @@ role it takes:
 | `ui` | Browses the archive and asks for entries to be served back. Receives broadcasts. |
 | `both` | Does each of the above on one connection. |
 
+`watch` is optional and defaults to `true`. Set it to `false` for query-only
+UI/both connections: this avoids unsolicited events and a notification worker.
+Capture-only connections never subscribe.
+
 The daemon answers with the archive's current shape:
 
 ```json
-{"ev":"hello","v":1,"entries":1284,"bytes":394857213,"budget":5368709120}
+{"ev":"hello","v":1,"entries":1284,"bytes":394857213,"budget":5368709120,"retention_days":7}
 ```
 
 A client that sends a `v` the daemon does not implement is answered with an
@@ -178,8 +179,12 @@ rest:
   {"id":42,"kind":"image","mimes":["image/png"],"bytes":184320,
    "preview":null,"width":1920,"height":1080,"thumb":true,
    "pinned":false,"source":"firefox","at":1789456123}
-]}
+],"more":false}
 ```
+
+The `more` flag means another page may exist. A response is trimmed to fit the
+frame limit even when fewer than `limit` rows fit; use the last row as the next
+cursor and follow `more`, not just the row count.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -199,7 +204,7 @@ truth: `mimes` is what actually decides what can be served.
 
 Pinned entries are the favorites list — the durable store for prompts,
 snippets and media kept past the live stream. They live in the same archive,
-are excluded from budget eviction and `clear`, and so survive daemon
+are excluded from age expiry, budget eviction and `clear`, and so survive daemon
 restarts and reboots like everything else on disk.
 
 ## Serving an entry back
@@ -258,7 +263,7 @@ The others answer `{"ev":"ok","req":N}`.
 
 ## Broadcasts
 
-A `ui` client receives these without asking, and they carry no `req`:
+A subscribed `ui` or `both` client receives these without asking, and they carry no `req`:
 
 ```json
 {"ev":"added","entry":{ ...summary... }}
@@ -321,3 +326,25 @@ still written and replayed correctly — and blobs an interrupted commit left
 unreferenced are swept at startup, so nothing leaks. Clipboard history is a
 workload where losing the newest second of copies to a power failure is cheap;
 paying an fsync per copy would be the wrong side of the bargain.
+
+
+## Retention and resource limits (0.2)
+
+`hello` and `stats` include `retention_days` (`7` by default; `null` disables
+expiry). The timestamp `at` is refreshed only by a new capture of identical
+content. Cleanup removes unpinned rows strictly older than `now - days*86400`,
+up to four batches of 256 at startup and every 60 seconds. Pin/unpin does not
+change `at`; an old unpinned row can expire on the next maintenance wake. A pin
+is committed with SQLite synchronous FULL. Explicit `remove` can delete pins.
+
+The server admits 32 connections and four concurrent drafts per connection,
+each with up to eight representations. MIME names are 1–256 printable ASCII
+characters and source hints are truncated to 128 Unicode characters. Greeting
+reads time out after three seconds; writes after two seconds. Idle UI reads
+stay open. Watch queues hold at most 64 events; overflow disconnects the slow
+subscriber so it can reconnect and list current state. Responses/payloads stay
+serialized on each socket. Clients must drain payloads even for unknown req IDs.
+
+When pinned content occupies the budget and a new entry cannot be retained,
+commit acknowledges `entry:0, created:false`; no added/updated ghost event is
+published. The same no-entry acknowledgement applies to empty/secret drafts.

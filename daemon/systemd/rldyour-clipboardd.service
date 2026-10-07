@@ -10,6 +10,8 @@ ExecStart=%h/.local/bin/rldyour-clipboardd
 # Pinned entries are never evicted, so this is a budget for what the daemon
 # collects on its own rather than a cap on what the user chose to keep.
 Environment=RLDYOUR_CLIPBOARD_BUDGET=5368709120
+Environment=RLDYOUR_CLIPBOARD_RETENTION_DAYS=7
+UMask=0077
 # One arena is enough for a process whose steady state is copying bytes
 # between a socket and a file.
 Environment=MALLOC_ARENA_MAX=1

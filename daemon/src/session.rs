@@ -31,8 +31,17 @@ pub struct Session {
     out: Arc<Outbox>,
     watchers: Arc<Watchers>,
     role: Role,
+    watch: bool,
     drafts: HashMap<u64, Draft>,
     next_draft: u64,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        for (_, draft) in self.drafts.drain() {
+            self.store.discard(draft.parts);
+        }
+    }
 }
 
 impl Session {
@@ -42,13 +51,14 @@ impl Session {
             out,
             watchers,
             role: Role::default(),
+            watch: true,
             drafts: HashMap::new(),
             next_draft: 1,
         }
     }
 
-    pub fn role(&self) -> Role {
-        self.role
+    pub fn watches(&self) -> bool {
+        self.role.watches() && self.watch
     }
 
     /// Reads the opening frame and answers it.
@@ -61,14 +71,16 @@ impl Session {
         };
 
         match proto::decode(&line) {
-            Ok(Request::Hello { v, role }) if v == proto::PROTOCOL_VERSION => {
+            Ok(Request::Hello { v, role, watch }) if v == proto::PROTOCOL_VERSION => {
                 self.role = role;
+                self.watch = watch;
                 let (entries, _pinned, bytes) = self.store.stats().unwrap_or((0, 0, 0));
                 self.out.send(&Response::Hello {
                     v: proto::PROTOCOL_VERSION,
                     entries,
                     bytes,
                     budget: self.store.budget(),
+                    retention_days: self.store.retention_days(),
                 })?;
                 Ok(true)
             }
@@ -121,12 +133,15 @@ impl Session {
                 if !self.role.records() {
                     return self.refuse(req, "this connection did not take the capture role");
                 }
+                if self.drafts.len() >= 4 {
+                    return self.refuse(req, "at most four drafts may be open");
+                }
                 let draft = self.next_draft;
                 self.next_draft += 1;
                 self.drafts.insert(
                     draft,
                     Draft {
-                        source,
+                        source: source.map(|source| source.chars().take(128).collect()),
                         parts: Vec::new(),
                     },
                 );
@@ -152,7 +167,9 @@ impl Session {
             Request::Commit { draft, .. } => self.commit(req, draft),
 
             Request::Abort { draft, .. } => {
-                self.drafts.remove(&draft);
+                if let Some(draft) = self.drafts.remove(&draft) {
+                    self.store.discard(draft.parts);
+                }
                 self.out.send(&Response::Ok { req })
             }
 
@@ -169,7 +186,25 @@ impl Session {
                     .store
                     .list(limit.unwrap_or(50), before, query.as_deref(), only, pinned)
                 {
-                    Ok(items) => self.out.send(&Response::List { req, items }),
+                    Ok(mut items) => {
+                        let requested =
+                            limit.unwrap_or(50).clamp(1, crate::store::index::MAX_LIMIT) as usize;
+                        let mut more = items.len() >= requested;
+                        let mut bytes = 128usize;
+                        let mut fits = 0;
+                        for item in &items {
+                            bytes += serde_json::to_vec(item).map_err(io::Error::other)?.len() + 1;
+                            if bytes > proto::MAX_FRAME {
+                                break;
+                            }
+                            fits += 1;
+                        }
+                        if fits < items.len() {
+                            items.truncate(fits);
+                            more = true;
+                        }
+                        self.out.send(&Response::List { req, items, more })
+                    }
                     Err(error) => self.failed(req, &error),
                 }
             }
@@ -199,14 +234,10 @@ impl Session {
                         &mut file,
                         bytes,
                     ),
-                    (_, Ok(Some((mime, content)))) => self.out.send_blob(
-                        &Response::Blob {
-                            req,
-                            mime,
-                            bytes: content.len() as u64,
-                        },
-                        &mut std::io::Cursor::new(&content),
-                        content.len() as u64,
+                    (_, Ok(Some((mime, mut content, bytes)))) => self.out.send_blob(
+                        &Response::Blob { req, mime, bytes },
+                        &mut content.file,
+                        bytes,
                     ),
                     (Err(error), _) | (_, Err(error)) => self.failed(req, &error),
                     (Ok(None), Ok(None)) => {
@@ -291,6 +322,7 @@ impl Session {
                     pinned,
                     bytes,
                     budget: self.store.budget(),
+                    retention_days: self.store.retention_days(),
                 }),
                 Err(error) => self.failed(req, &error),
             },
@@ -312,7 +344,10 @@ impl Session {
         bytes: Option<u64>,
         input: &mut impl BufRead,
     ) -> io::Result<()> {
-        let known = self.drafts.contains_key(&draft);
+        let known = self
+            .drafts
+            .get(&draft)
+            .is_some_and(|draft| draft.parts.len() < crate::kind::MAX_REPRESENTATIONS);
 
         let outcome = match bytes {
             Some(declared) => self.whole_part(&mime, known, declared, input)?,
@@ -459,7 +494,7 @@ impl Session {
             ));
         };
 
-        match self
+        let result = match self
             .store
             .commit(&draft.parts, draft.source.as_deref(), now())
         {
@@ -475,16 +510,18 @@ impl Session {
                     self.watchers
                         .broadcast(&Response::Removed { entry: evicted });
                 }
-                let event = if done.created {
-                    Response::Added {
-                        entry: done.summary,
-                    }
-                } else {
-                    Response::Updated {
-                        entry: done.summary,
-                    }
-                };
-                self.watchers.broadcast(&event);
+                if done.entry != 0 {
+                    let event = if done.created {
+                        Response::Added {
+                            entry: done.summary,
+                        }
+                    } else {
+                        Response::Updated {
+                            entry: done.summary,
+                        }
+                    };
+                    self.watchers.broadcast(&event);
+                }
                 Ok(())
             }
             // A draft that was empty or held a secret. The client is told the
@@ -495,7 +532,9 @@ impl Session {
                 created: false,
             }),
             Err(error) => self.failed(req, &error),
-        }
+        };
+        self.store.discard(draft.parts);
+        result
     }
 
     fn refuse(&self, req: u64, message: &str) -> io::Result<()> {

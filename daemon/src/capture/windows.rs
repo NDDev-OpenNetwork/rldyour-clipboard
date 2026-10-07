@@ -7,7 +7,6 @@
 //! message. No polling, and no cost at all between copies.
 
 use super::Recorder;
-use std::ffi::c_void;
 use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::DataExchange::{
@@ -111,10 +110,10 @@ unsafe extern "system" fn window_procedure(
     lparam: LPARAM,
 ) -> LRESULT {
     if message == WM_CLIPBOARDUPDATE {
-        if let Some(recorder) = RECORDER.get() {
-            if let Some(parts) = read() {
-                recorder.record(parts, None);
-            }
+        if let Some(recorder) = RECORDER.get()
+            && let Some(parts) = read()
+        {
+            recorder.record(parts, None);
         }
         return 0;
     }
@@ -180,10 +179,10 @@ fn read_opened() -> Option<Vec<(String, Vec<u8>)>> {
 }
 
 fn push(parts: &mut Vec<(String, Vec<u8>)>, mime: &str, content: Option<Vec<u8>>) {
-    if let Some(bytes) = content {
-        if !bytes.is_empty() {
-            parts.push((mime.to_string(), bytes));
-        }
+    if let Some(bytes) = content
+        && !bytes.is_empty()
+    {
+        parts.push((mime.to_string(), bytes));
     }
 }
 
@@ -197,10 +196,10 @@ fn concealed() -> bool {
         "Clipboard Viewer Ignore",
         "ClipboardViewerIgnore",
     ] {
-        if let Some(format) = lookup(name) {
-            if unsafe { IsClipboardFormatAvailable(format) } != 0 {
-                return true;
-            }
+        if let Some(format) = lookup(name)
+            && unsafe { IsClipboardFormatAvailable(format) } != 0
+        {
+            return true;
         }
     }
 
@@ -242,13 +241,13 @@ fn raw(format: u32) -> Option<Vec<u8>> {
         return None;
     }
 
-    let pointer = unsafe { GlobalLock(handle as *mut c_void) };
+    let pointer = unsafe { GlobalLock(handle) };
     if pointer.is_null() {
         return None;
     }
-    let size = unsafe { GlobalSize(handle as *mut c_void) };
+    let size = unsafe { GlobalSize(handle) };
     let bytes = unsafe { std::slice::from_raw_parts(pointer as *const u8, size) }.to_vec();
-    unsafe { GlobalUnlock(handle as *mut c_void) };
+    unsafe { GlobalUnlock(handle) };
 
     Some(bytes)
 }
@@ -256,7 +255,9 @@ fn raw(format: u32) -> Option<Vec<u8>> {
 /// Turns a UTF-16 clipboard string into UTF-8, dropping the terminator.
 fn utf16_to_utf8(bytes: Vec<u8>) -> Vec<u8> {
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .take_while(|unit| *unit != 0)
         .collect();

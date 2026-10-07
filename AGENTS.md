@@ -9,8 +9,9 @@ inside the daemon.
 
 | Path | What it is |
 |---|---|
-| `daemon/` | Rust daemon: `capture/` (per-OS backends: `x11.rs`, `macos.rs`, `windows.rs`), `store/` (SQLite index + content-addressed blobs + thumbnails), `net.rs`, `proto.rs`, `session.rs`, `kind.rs` (mime ranking / sensitive hints / protocol-target filtering) |
+| `daemon/` | Rust daemon: `capture/` (per-OS backends: `x11.rs`, `macos.rs`, `windows.rs`), `store/` (SQLite index + content-addressed blobs + thumbnails), `config.rs`, `server.rs`, `maintenance.rs`, `net.rs`, `proto.rs`, `session.rs`, `kind.rs` (mime ranking / sensitive hints / protocol-target filtering) |
 | `extension/` | GNOME Shell extension (GNOME 46–50): `lib/capture.js`, `restore.js`, `client.js`, `mimes.js`, `indicator.js` |
+| `macos/` | Native AppKit menu; typed models, bounded streaming socket client, UI; Swift 6, macOS 12+ |
 | `python/` | Dependency-free protocol client + CLI |
 | `daemon/systemd/` | `rldyour-clipboardd.{service,socket}` — socket-activated, sandboxed |
 | `daemon/launchd/` | macOS agent plist (`launch_activate_socket("sock")` contract) |
@@ -23,7 +24,7 @@ cd daemon && cargo test --all-features && cargo clippy --all-targets --all-featu
 ./scripts/check-extension.sh && gjs -m extension/tests/smoke.js
 cd python && python3 -m pytest
 ./scripts/check-consistency.sh
-RLDYOUR_CLIPBOARD_HOME=$(mktemp -d) ./daemon/target/debug/rldyour-clipboardd &
+RLDYOUR_CLIPBOARD_CAPTURE=0 RLDYOUR_CLIPBOARD_HOME=$(mktemp -d /tmp/cb.XXXX) ./daemon/target/debug/rldyour-clipboardd &
 ./scripts/e2e-sample.py   # against the spawned daemon's socket
 ```
 
@@ -68,9 +69,16 @@ the script.
 
 - Live service: `systemctl --user status rldyour-clipboardd.{socket,service}`;
   logs `journalctl --user -u rldyour-clipboardd.service`.
-- A self-bound daemon removes an existing socket file before binding — a stray
-  test process can steal `/run/user/1000/rldyour-clipboard.sock` from the
-  socket unit. Symptom: captures work, reads return an empty/stale archive.
-  Fix: kill the stray, `systemctl --user restart rldyour-clipboardd.socket`.
+- A self-bound daemon refuses a live listener, symlink or regular file; only
+  a dead socket is replaced. An exclusive archive lock prevents two processes
+  from sweeping or indexing the same store. Always isolate tests with a short
+  temporary `RLDYOUR_CLIPBOARD_HOME` and `RLDYOUR_CLIPBOARD_CAPTURE=0`.
+- Retention defaults to 7 days since the latest capture. Startup and 60-second
+  maintenance expire only unpinned entries, at most 4 batches of 256 per wake.
+  Pinning uses a FULL-synchronous SQLite commit; unpinning restores the age
+  policy and never refreshes the timestamp. Leases protect unfinished drafts.
+- Never inspect, dump or export a user's clipboard for tests. Use synthetic
+  fixtures, including the macOS `CLIPBOARD_QA` build (which never writes the
+  system pasteboard), and restrict live checks to service/aggregate metadata.
 - Never restart the desktop session to test; the daemon side is verifiable
   entirely through the socket and journal.

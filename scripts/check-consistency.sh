@@ -14,6 +14,15 @@ FAILED=0
 fail() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAILED=1; }
 pass() { printf '  \033[32mok\033[0m   %s\n' "$1"; }
 
+extract() {
+  python3 - "$1" "$2" <<'PY_EXTRACT'
+import pathlib,re,sys
+m=re.search(sys.argv[2],pathlib.Path(sys.argv[1]).read_text(),re.M)
+if m is None: raise SystemExit("missing invariant: "+sys.argv[2])
+print(m.group(1))
+PY_EXTRACT
+}
+
 echo "Mime preference tables"
 python3 - "${ROOT}" <<'PY' || FAILED=1
 import pathlib, re, sys
@@ -121,9 +130,9 @@ sys.exit(0 if ok else 1)
 PY
 
 echo "Protocol version"
-rust_version="$(grep -oP 'PROTOCOL_VERSION: u32 = \K\d+' "${ROOT}/daemon/src/proto.rs")"
-js_version="$(grep -oP 'const PROTOCOL_VERSION = \K\d+' "${ROOT}/extension/lib/client.js")"
-py_version="$(grep -oP '^PROTOCOL_VERSION = \K\d+' "${ROOT}/python/src/rldyour_clipboard/__init__.py")"
+rust_version="$(extract "${ROOT}/daemon/src/proto.rs" 'PROTOCOL_VERSION: u32 = (\d+)')"
+js_version="$(extract "${ROOT}/extension/lib/client.js" 'const PROTOCOL_VERSION = (\d+)')"
+py_version="$(extract "${ROOT}/python/src/rldyour_clipboard/__init__.py" '^PROTOCOL_VERSION = (\d+)')"
 if [ "${rust_version}" = "${js_version}" ] && [ "${rust_version}" = "${py_version}" ]; then
   pass "every client speaks version ${rust_version}"
 else
@@ -131,10 +140,10 @@ else
 fi
 
 echo "Socket name"
-rust_socket="$(grep -oP 'SOCKET_NAME: &str = "\K[^"]+' "${ROOT}/daemon/src/net.rs")"
-js_socket="$(grep -oP "const SOCKET_NAME = '\K[^']+" "${ROOT}/extension/lib/client.js")"
-py_socket="$(grep -oP 'rldyour-clipboard\.sock' "${ROOT}/python/src/rldyour_clipboard/__init__.py" | head -1)"
-unit_socket="$(grep -oP 'ListenStream=%t/\K.*' "${ROOT}/daemon/systemd/rldyour-clipboardd.socket")"
+rust_socket="$(extract "${ROOT}/daemon/src/net.rs" 'SOCKET_NAME: &str = "([^"]+)"')"
+js_socket="$(extract "${ROOT}/extension/lib/client.js" 'const SOCKET_NAME = '\''([^'\'']+)'\''')"
+py_socket="$(extract "${ROOT}/python/src/rldyour_clipboard/__init__.py" '(rldyour-clipboard\.sock)')"
+unit_socket="$(extract "${ROOT}/daemon/systemd/rldyour-clipboardd.socket" '^ListenStream=%t/(.*)')"
 if [ "${rust_socket}" = "${js_socket}" ] && [ "${rust_socket}" = "${py_socket}" ] \
    && [ "${rust_socket}" = "${unit_socket}" ]; then
   pass "every client and the systemd unit use ${rust_socket}"
@@ -143,9 +152,9 @@ else
 fi
 
 echo "Frame size limit"
-rust_frame="$(grep -oP 'MAX_FRAME: usize = \K.*(?=;)' "${ROOT}/daemon/src/proto.rs" | tr -d ' ')"
-js_frame="$(grep -oP 'const MAX_FRAME = \K.*(?=;)' "${ROOT}/extension/lib/client.js" | tr -d ' ')"
-py_frame="$(grep -oP '^MAX_FRAME = \K.*' "${ROOT}/python/src/rldyour_clipboard/__init__.py" | tr -d ' ')"
+rust_frame="$(extract "${ROOT}/daemon/src/proto.rs" 'MAX_FRAME: usize = ([^;]+)' | tr -d ' ')"
+js_frame="$(extract "${ROOT}/extension/lib/framing.js" 'const MAX_FRAME = ([^;]+)' | tr -d ' ')"
+py_frame="$(extract "${ROOT}/python/src/rldyour_clipboard/__init__.py" '^MAX_FRAME = ([^\n]+)' | tr -d ' ')"
 if [ "${rust_frame}" = "${js_frame}" ] && [ "${rust_frame}" = "${py_frame}" ]; then
   pass "every side caps a control frame at ${rust_frame}"
 else
@@ -156,7 +165,7 @@ echo "launchd agent"
 # The daemon asks launchd for a socket by name; the plist must offer that
 # same key and land it on the socket file every client opens.
 plist="${ROOT}/daemon/launchd/io.nddev.rldyour-clipboardd.plist"
-socket_key="$(grep -oP 'CString::new\("\K[^"]+' "${ROOT}/daemon/src/main.rs" | head -1)"
+socket_key="$(extract "${ROOT}/daemon/src/net.rs" 'launch_activate_socket\(c"([^"]+)"')"
 if [ -f "${plist}" ] \
     && grep -q "<key>${socket_key}</key>" "${plist}" \
     && grep -q "/${rust_socket}</string>" "${plist}"; then
@@ -167,7 +176,7 @@ fi
 
 echo "Archive directory"
 # The unit grants write access to exactly one path; the daemon must agree.
-unit_path="$(grep -oP 'ReadWritePaths=%h/\K.*' "${ROOT}/daemon/systemd/rldyour-clipboardd.service")"
+unit_path="$(extract "${ROOT}/daemon/systemd/rldyour-clipboardd.service" '^ReadWritePaths=%h/(.*)')"
 if grep -q "\.local/share/${unit_path##*/}" "${ROOT}/daemon/src/store/mod.rs"; then
   pass "the unit grants write access to the archive the daemon opens"
 else

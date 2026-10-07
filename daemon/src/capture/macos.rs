@@ -7,9 +7,10 @@
 //! count has actually moved.
 
 use super::Recorder;
+use objc2::rc::Retained;
 use objc2::rc::autoreleasepool;
 use objc2_app_kit::NSPasteboard;
-use objc2_foundation::NSString;
+use objc2_foundation::{NSData, NSString};
 use std::time::Duration;
 
 /// How often `changeCount` is read. Fast enough that a copy is archived before
@@ -54,31 +55,43 @@ const CONCEALED: &[&str] = &[
 ];
 
 pub fn watch(recorder: &Recorder) {
-    let pasteboard = unsafe { NSPasteboard::generalPasteboard() };
+    let pasteboard = NSPasteboard::generalPasteboard();
     // Start from whatever is already there rather than archiving the contents
     // of the clipboard as though it had just been copied.
-    let mut seen = unsafe { pasteboard.changeCount() };
+    let mut seen = pasteboard.changeCount();
 
     loop {
         std::thread::sleep(POLL);
 
-        let current = unsafe { pasteboard.changeCount() };
+        let current = pasteboard.changeCount();
         if current == seen {
             continue;
         }
         seen = current;
 
         if let Some(parts) = read(&pasteboard) {
-            recorder.record(parts, None);
+            // Several representations must describe one copy, even when a
+            // producer changes the pasteboard while AppKit materialises data.
+            if pasteboard.changeCount() != current {
+                continue;
+            }
+            // AppKit owns the materialised NSData; the blob writer reads it
+            // directly instead of making another full-size Vec per format.
+            recorder.record_borrowed(
+                parts
+                    .iter()
+                    .map(|(mime, data)| (mime.as_str(), unsafe { data.as_bytes_unchecked() })),
+                None,
+            );
         }
     }
 }
 
 /// Reads every representation worth keeping, or nothing at all when the
 /// pasteboard says its contents are a secret.
-fn read(pasteboard: &NSPasteboard) -> Option<Vec<(String, Vec<u8>)>> {
+fn read(pasteboard: &NSPasteboard) -> Option<Vec<(String, Retained<NSData>)>> {
     autoreleasepool(|pool| {
-        let available = unsafe { pasteboard.types() }?;
+        let available = pasteboard.types()?;
         let offered: Vec<String> = available.iter().map(|name| name.to_string()).collect();
 
         if offered
@@ -89,17 +102,32 @@ fn read(pasteboard: &NSPasteboard) -> Option<Vec<(String, Vec<u8>)>> {
         }
 
         let mut parts = Vec::new();
+        if let Some(items) = pasteboard.pasteboardItems() {
+            let mut urls = Vec::new();
+            let key = NSString::from_str("public.file-url");
+            for item in items.iter() {
+                if let Some(data) = item.dataForType(&key) {
+                    urls.extend_from_slice(unsafe { data.as_bytes_unchecked() });
+                    urls.extend_from_slice(b"\r\n");
+                }
+            }
+            if !urls.is_empty() {
+                parts.push(("text/uri-list".to_string(), NSData::with_bytes(&urls)));
+            }
+        }
         for (uti, mime) in TYPES {
+            if parts.iter().any(|(seen, _)| seen == mime) {
+                continue;
+            }
             if !offered.iter().any(|name| name == uti) {
                 continue;
             }
             let key = NSString::from_str(uti);
-            let Some(data) = (unsafe { pasteboard.dataForType(&key) }) else {
+            let Some(data) = pasteboard.dataForType(&key) else {
                 continue;
             };
-            let bytes = unsafe { data.as_bytes_unchecked() }.to_vec();
-            if !bytes.is_empty() {
-                parts.push((mime.to_string(), bytes));
+            if data.length() != 0 {
+                parts.push((mime.to_string(), data));
             }
         }
 
