@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. The daemon, the
 Python client and this file are released together and carry the same version.
 
+## 0.2.1 — 2026-10-07
+
+- Flush pinned content before acknowledging its SQLite pin commit. On POSIX,
+  also synchronize the blob, fanout and archive directory entries. Missing or
+  redirected content fails pinning instead of leaving an unusable favorite.
+- Centralize archive filesystem checks with Unix and Windows backends. Refuse
+  relative paths, parent traversal, symlink/reparse ancestors and non-regular
+  index/blob files; incoming writes use private, exclusive file creation.
+- Add synthetic regression checks for private modes, redirected roots/indexes
+  and missing pinned content. Canonicalize isolated temp roots for macOS CI.
+  Windows flushes file buffers and WAL without a directory-fsync guarantee.
+
 ## 0.2.0 — 2026-10-07
 
 - Unpinned history expires seven days after its latest capture; pins survive

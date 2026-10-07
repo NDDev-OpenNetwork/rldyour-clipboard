@@ -10,6 +10,7 @@ mod outbox;
 mod proto;
 mod server;
 mod session;
+mod storage_fs;
 mod store;
 #[cfg(test)]
 mod testing;

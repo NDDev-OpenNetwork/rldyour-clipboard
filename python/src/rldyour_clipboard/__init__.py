@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator, NamedTuple, Optional, Sequence, TypedDict
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 PROTOCOL_VERSION = 1
 

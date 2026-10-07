@@ -402,6 +402,14 @@ impl Index {
         changed.map(|changed| changed > 0)
     }
 
+    pub fn entry_digests(&self, entry: i64) -> rusqlite::Result<Vec<String>> {
+        let mut query = self.connection.prepare(
+            "SELECT digest FROM part WHERE entry = ?1
+             UNION SELECT thumb FROM entry WHERE id = ?1 AND thumb IS NOT NULL",
+        )?;
+        query.query_map([entry], |row| row.get(0))?.collect()
+    }
+
     /// Deletes one entry, returning the digests no record points at any more.
     pub fn remove(&mut self, entry: i64) -> rusqlite::Result<Vec<String>> {
         let transaction = self.connection.transaction()?;
