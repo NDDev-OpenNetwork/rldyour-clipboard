@@ -26,9 +26,11 @@ inside the daemon.
 
 ```sh
 ./scripts/check-version.sh
-cd daemon && cargo test --all-features && cargo clippy --all-targets --all-features -- -D warnings && cargo fmt --check
+cargo fmt --check --manifest-path daemon/Cargo.toml
+cargo test --locked --all-features --manifest-path daemon/Cargo.toml
+cargo clippy --locked --all-targets --all-features --manifest-path daemon/Cargo.toml -- -D warnings
 ./scripts/check-extension.sh && gjs -m extension/tests/smoke.js
-cd python && python3 -m pytest
+PYTHONPATH=python/src uv run --no-project --with pytest==9.1.1 pytest python/tests
 ./scripts/check-consistency.sh
 test_root=$(mktemp -d /tmp/cb.XXXX)
 export RLDYOUR_CLIPBOARD_HOME=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$test_root")
