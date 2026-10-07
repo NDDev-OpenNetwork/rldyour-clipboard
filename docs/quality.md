@@ -1,4 +1,4 @@
-# Clipboard 0.2 quality and architecture
+# Clipboard 0.2.1 quality and architecture
 
 The Rust daemon owns policy, transport/session admission, native capture,
 maintenance and persistence in separate modules. Clients never open the index.
@@ -39,7 +39,17 @@ Shell. That validates transport and static GNOME compatibility, not a live
 visual test of every GNOME version. The macOS QA build uses synthetic entries
 and disables writes to the actual system pasteboard.
 
-## Primary references checked 2026-10-07
+## 0.2.1 qualification — 2026-10-08
+
+The signed 0.2.1 release passed the complete CI matrix: Linux, Windows,
+macOS ARM/Intel, GNOME framing, Python, Swift clients, MSRV and dependency
+advisories. The Rust daemon ran 83 tests on both development machines, and the
+synthetic retention/pin/restart integration passed on both. Installed sockets
+and clients report the same protocol and release version. These checks use
+synthetic archives and aggregate service metadata; they never inspect a user's
+history or write the system pasteboard.
+
+## Primary references checked 2026-10-08
 
 - [SQLite WAL, durability and WAL-reset bug](https://www.sqlite.org/wal.html).
 - [SQLite synchronous policy](https://www.sqlite.org/pragma.html#pragma_synchronous).

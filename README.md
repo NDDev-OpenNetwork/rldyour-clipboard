@@ -4,6 +4,8 @@ A local clipboard archive with a Rust daemon, a GNOME history picker and a
 native macOS menu. Text, rich text, images and file references retain their
 portable representations. Identical content is deduplicated on disk.
 
+Current stable release: **0.2.1**.
+
 **Unpinned entries expire seven days after their latest capture. Pinned entries
 stay until explicitly removed.** Re-copying recorded content refreshes its
 capture timestamp; pinning and restoring do not. Unpinning an old entry makes

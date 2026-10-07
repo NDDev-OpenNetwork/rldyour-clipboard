@@ -1,5 +1,9 @@
 # rldyour-clipboard — working notes
 
+Current stable release: 0.2.1. Keep daemon, Python client, changelog and
+release metadata aligned; final machine qualification belongs in a metadata
+receipt outside this repository.
+
 Clipboard archive: a Rust daemon owns the store; thin platform clients capture
 and restore. Linux capture is split — the daemon watches X11 itself (XFIXES),
 the GNOME Shell extension covers Wayland. macOS and Windows capture natively
@@ -21,6 +25,7 @@ inside the daemon.
 ## Verify
 
 ```sh
+./scripts/check-version.sh
 cd daemon && cargo test --all-features && cargo clippy --all-targets --all-features -- -D warnings && cargo fmt --check
 ./scripts/check-extension.sh && gjs -m extension/tests/smoke.js
 cd python && python3 -m pytest
