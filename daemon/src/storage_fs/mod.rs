@@ -92,7 +92,8 @@ mod tests {
     fn relative_parent_traversal_and_non_regular_archive_files_are_refused() {
         let f = crate::testing::TempDir::new();
         assert!(plain(Path::new("relative-archive")).is_err());
-        assert!(plain(&f.path().join("sub/../archive")).is_err());
+        let traversal = PathBuf::from(format!(r"{}\sub\..\archive", f.path().display()));
+        assert!(plain(&traversal).is_err());
         assert!(regular(f.path()).is_err());
     }
     #[cfg(unix)]
