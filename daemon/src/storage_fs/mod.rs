@@ -18,6 +18,18 @@ pub fn plain(path: &Path) -> io::Result<()> {
     if !path.is_absolute() {
         return Err(io::Error::other("absolute archive path required"));
     }
+    // Windows normalizes `..` while iterating `Path::components()`. Inspect
+    // the lexical spelling first so a redirected archive cannot hide behind
+    // that normalization. Backslash is included for the cross-platform test
+    // and is not a valid separator in Unix archive names used by the daemon.
+    if path
+        .as_os_str()
+        .to_string_lossy()
+        .split(['/', '\\'])
+        .any(|part| part == "..")
+    {
+        return Err(io::Error::other("archive parent traversal refused"));
+    }
     let mut current = PathBuf::new();
     for part in path.components() {
         if matches!(part, Component::ParentDir) {
