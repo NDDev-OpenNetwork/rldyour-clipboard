@@ -1,343 +1,161 @@
 # rldyour-clipboard
 
-A clipboard that remembers. One Rust daemon keeps everything you copy — text,
-images, file references, at any size — and a tray icon beside your other
-indicators opens a picker that puts a chosen entry back where you were typing.
+A local clipboard archive with a Rust daemon, a GNOME history picker and a
+native macOS menu. Text, rich text, images and file references retain their
+portable representations. Identical content is deduplicated on disk.
 
-On Linux the daemon watches X11 itself and a GNOME Shell extension covers
-Wayland — the one place nothing else may see the selection. macOS and Windows
-capture natively inside the daemon. Every platform exposes the same versioned
-local protocol.
+**Unpinned entries expire seven days after their latest capture. Pinned entries
+stay until explicitly removed.** Re-copying recorded content refreshes its
+capture timestamp; pinning and restoring do not. Unpinning an old entry makes
+it eligible for the next cleanup. Expiry runs at startup and every minute, in
+bounded batches (up to 1,024 entries per wake); a large backlog drains over
+successive wakes. Cleanup removes metadata, search rows and unreferenced blobs.
 
-## Why it is two pieces
+## Architecture and resource policy
 
-The split is not tidiness. Under GNOME the only code that can see the clipboard
-is code running inside the shell — mutter implements neither
-`wlr-data-control` nor `ext-data-control-v1`, and its maintainers have said it
-will not, because handing one application another's clipboard is exactly what
-a compositor is there to prevent. So capture has to live in an extension.
-
-That extension runs on the compositor's own thread. Anything it does
-synchronously, the desktop does not do. Hashing a screenshot, querying an
-index, decoding a thumbnail, waiting on a disk — each of those is a visible
-stutter in every animation on screen. So the extension is kept to the one
-thing only it can do: it reads the selection and streams it out. It stores
-nothing, hashes nothing, decodes nothing, and keeps no history.
-
-Everything else is the daemon, which restarts in milliseconds. Under Wayland
-the shell cannot be restarted without logging out, so any change to extension
-code costs a session; keeping the extension thin and stable, and putting
-everything that evolves behind a socket, is what makes the thing maintainable.
-
-On X11 the shell is not needed for capture at all: any client may watch
-`CLIPBOARD`, so the daemon subscribes to `XFIXES` selection events itself and
-reads the offered targets directly. That is also what makes remote desktops
-work — in an XRDP session `xrdp-chansrv` owns `CLIPBOARD` like any other X11
-client, and the daemon archives whatever the remote side copies without the
-extension being loaded, or GNOME being involved, at all. Where both run —
-a GNOME X11 session — the same copy may be seen twice; identical
-representation sets fold into one entry, and a set the shell proxies
-differently simply records a near-duplicate rather than losing the copy.
-
-## Unlimited, and what that means
-
-Nothing in the design caps an entry's size.
-
-A control frame states how many bytes follow it, and both sides stream those
-bytes rather than holding them. When the length is not known in advance — a
-compositor hands a selection over as a stream and never says how long it is —
-the payload arrives as chunks ending with a zero-length one. The daemon hashes
-each representation as it writes it, in one pass, through a 64 KiB buffer. A
-half-gigabyte paste costs the same resident memory as a half-kilobyte one.
-
-This is where it differs from the alternatives. Clipboard managers built as
-extensions generally pass content through the shell as a byte array, which is
-why they cap what they keep — a popular one stops at four megabytes for
-images. Here the bytes never enter the shell's heap at all.
-
-The one bound that remains is policy, not plumbing: the extension declines a
-single representation larger than `max-entry-megabytes` — 512 MiB by default,
-adjustable in preferences — because even a streamed transfer occupies the
-compositor for its duration. The daemon and the wire impose no such limit.
-
-The count of entries is unlimited too. What is rationed is disk:
-
-| | |
+| Component | Responsibility |
 |---|---|
-| Entries | no limit |
-| Disk | 5 GiB by default, configurable |
-| Over budget | the oldest unpinned entries are evicted |
-| Pinned entries | never evicted |
-| One entry larger than the whole budget | refused, not made room for |
+| Rust `config` / `server` / `maintenance` | Policy, bounded connections, lifecycle and expiry |
+| Rust `store` | SQLite metadata/FTS, content-addressed blobs, leases, thumbnails |
+| Rust `capture` | Native macOS/Windows watchers; X11 XFIXES on Linux |
+| GNOME extension | Wayland selection access, async streaming, picker and restore |
+| macOS AppKit client | Menu, search, paging, pinning, multi-format restore |
+| Python client | Dependency-free protocol API and streaming CLI |
 
-Identical content is stored once however many entries reference it, and copying
-the same thing twice moves one entry's timestamp rather than adding a second.
+The daemon streams blob I/O in 64 KiB chunks. Thumbnail/image work is serialized
+and stays outside the index lock. Control frames are limited to 64 KiB, active
+connections to 32, drafts to four per connection and representations to eight
+per draft. Watcher queues are bounded and writes time out; a slow reader cannot
+block capture. Large UI restores and BMP transcodes use private temporary
+files instead of extra full-size buffers. Native OS APIs may themselves
+materialize clipboard data; the archive does not promise constant memory for
+those APIs or image decoding.
 
-## What it keeps
+The default disk budget is 5 GiB. Oldest unpinned entries are evicted under
+pressure; pins are preserved. A single entry larger than the budget is refused.
+Pins may exhaust that budget, leaving no room for new unpinned entries. The
+archive is private (0700 directory / 0600 Unix socket), local and unencrypted.
+Password-manager, concealed, transient and clipboard-history exclusion hints
+are checked before capture and again before commit. These hints depend on the
+source application; the utility cannot identify arbitrary unmarked secrets.
 
-An entry holds **every representation its source offered**, not a flattening of
-one. Copying from a browser archives the HTML and the plain text; copying a
-screenshot archives the PNG. Entries are classified for display as text, link,
-colour, image or files, but that is a presentation hint — the mime types are
-what decide what can be served back.
+## Linux / GNOME
 
-**Thumbnails cost the desktop nothing.** The daemon makes one when it archives
-a picture, stores it compressed, and serves it back as ready-to-upload pixels.
-So opening a list of forty images uploads forty small buffers and decodes
-nothing — where decoding them in the shell would be forty stalls of every
-animation on screen. It is also the only thing that works: the shell's texture
-cache renders raw data from an `St.ImageContent` and from nothing else, and
-quietly draws an empty icon for anything it cannot look up in an icon theme.
-
-**Video, honestly.** No clipboard carries video bytes; copying a video file
-puts a *reference* on the clipboard — `text/uri-list` or
-`x-special/gnome-copied-files`. Those are archived and pasted back faithfully,
-and the row shows a file icon. Extracting a preview frame would need ffmpeg and
-is not done.
-
-## Remote desktops
-
-Anything copied on a remote machine reached over RDP lands in the archive. The
-RDP client sends its clipboard over the `cliprdr` channel, `xrdp-chansrv`
-claims `CLIPBOARD` on the X11 display and offers the remote formats — text as
-`UTF8_STRING` and friends, files as `text/uri-list` and
-`x-special/gnome-copied-files`, images as `image/bmp` — and the daemon's X11
-watcher records them exactly as it records a local copy. No configuration is
-needed beyond an xrdp build that relays the clipboard, and no GNOME component
-is involved.
-
-One asymmetry is worth knowing: xrdp's chansrv offers remote images to X11 —
-and requests local ones back — only as `image/bmp`, because the RDP channel
-carries `CF_DIB`. A stored PNG served as PNG is simply invisible to a remote
-client. Restoring an image entry on X11 therefore asks the daemon for a BMP
-rendering, which it produces on demand without touching what is stored;
-clients can ask for the same thing explicitly with `transcode` on `fetch`.
-
-## Secrets are not archived
-
-An entry that advertises `x-kde-passwordManagerHint` (what KeePassXC, KWallet
-and Klipper agree on), the NSPasteboard concealed type, or the Windows
-clipboard-history exclusion formats is dropped whole — not stored and then
-hidden. The check runs in the capture path, so the bytes never leave the
-compositor, and again in the daemon, so a backend cannot forget it.
-
-Applications can also be excluded by window class in the extension's
-preferences.
-
-## Install on Linux
-
-Requires Rust 1.85 or newer and GNOME Shell 46 (Ubuntu 24.04 LTS) through 50.
-On X11, `xclip` is recommended: restoring an entry through it offers the bytes
-for every paste target an application might request, where the compositor's
-own memory source can offer only one.
+GNOME Shell 46–50 is supported. Wayland capture requires the in-shell extension;
+X11 capture runs in the daemon. `xclip` is recommended for X11 restores.
+From a release archive, no Rust toolchain is needed. A source install requires
+Rust 1.95+ and `glib-compile-schemas`.
 
 ```sh
 ./install.sh
-```
-
-This builds the daemon into `~/.local/bin`, installs a socket-activated user
-service, and copies the extension into place. Nothing needs root.
-
-The daemon starts on the first connection. Wherever it can watch the clipboard
-itself — every X11 or XRDP session, macOS, Windows — it stays resident to keep
-capturing; only a daemon with nothing to watch exits two minutes after the
-last client disconnects. The archive is durable and survives either way.
-
-Then load the extension. On X11 the shell reloads in place — press Alt+F2, type
-`r`, press Enter. Under Wayland there is no way to do that, so log out and back
-in. Either way:
-
-```sh
 gnome-extensions enable rldyour-clipboard@nddev-opennetwork
 ```
 
-To remove the program: `./uninstall.sh`. It leaves the archive alone — what you
-copied is your data, and deleting it is a separate, deliberate act.
+On Wayland, log out and back in once to load newly installed extension code.
+The installer never restarts your desktop. Click the panel icon or use the
+configurable shortcut (default **Super+V**). Recent and Favorites support
+search, kind filters and paging. Click the star to keep a record indefinitely.
+Enter/click pastes into the previous window; Shift+Enter only restores it to
+the clipboard. Terminal paste shortcuts can be configured in preferences.
 
-## Using it
+Wayland restore uses the one MIME representation supported by Mutter's memory
+selection source. X11 `xclip` offers compatible text aliases; image restores
+request BMP for remote-desktop compatibility. File entries store references,
+not copies of the referenced files. `./uninstall.sh` preserves the archive.
 
-Click the clipboard icon in the tray, or press **Super+V**. The picker has two
-pages: **Recent**, the live stream of the newest copies, and **Favorites**, a
-durable store for anything worth keeping — prompts, snippets, images, file
-references. Starring a row moves it to Favorites, where budget eviction and
-`clear` can never reach it; both pages page further results in on scroll and
-accept the kind filters and search.
+## macOS 12+
 
-| | |
-|---|---|
-| Type | searches the current page, narrowing as you go |
-| Up / Down | move through the list |
-| Enter | paste the selected entry |
-| Shift+Enter | put it on the clipboard without pasting |
-| Escape | clear the search, then close |
-| Click a row | paste it |
-| Star | move the entry to Favorites, kept past restarts and eviction |
-
-Choosing an entry puts it on the clipboard and types the paste shortcut into
-the window that had the keyboard a moment ago — Ctrl+Shift+V where Ctrl+V
-would be wrong, which in a terminal it is.
-
-Favorites are also the prompt store for scripts and models: the Python client
-lists them with `Client.favorites()` or `rldyour-clipboard list --favorites`,
-`pin`/`unpin` star an entry from a shell, and `get` writes one back to stdout
-for piping.
-
-### The one real limitation
-
-An entry is restored with **one** representation, not all of them — and on
-Wayland that is a hard constraint. `MetaSelectionSourceMemory` is the only
-selection source mutter exposes, it carries a single mime type, and it answers
-requests for exactly that type and nothing else. Offering several would need a
-custom `MetaSelectionSource`, which cannot be written in an extension: GJS
-refuses to implement a vfunc that takes a callback, and `read_async` is
-exactly that.
-
-On X11 the constraint does not apply, because the extension does not have to be
-the owner: restore hands the bytes to `xclip`, a real X11 client that answers
-whichever target the pasting application asks for — `UTF8_STRING`, `STRING`,
-`text/plain`, all of them — which is precisely what a Wayland memory source
-cannot do. `xclip` is a recommended dependency on X11 for that reason; without
-it restore falls back to the single-mime memory source.
-
-So the choice is made to fail safe. Images and file references are restored as
-themselves — images as `image/bmp` where an RDP client may be listening.
-Text is restored as `text/plain` even when the entry also holds HTML, because
-plain text pasted into a rich editor is merely unstyled, whereas HTML offered
-to a terminal or a search field matches nothing and pastes nothing at all. The
-archive keeps both either way.
-
-## Install on macOS and Windows
-
-The daemon builds and captures natively on both, and is verified on each by CI.
-Neither has a tray client yet — the picker is Linux-only in the 0.1 series —
-so on those platforms the archive is reached through the protocol or the Python
-client.
-
-macOS watches `NSPasteboard`'s change count, which is the documented way to
-notice a copy; Windows registers a clipboard format listener on a message-only
-window, so it costs nothing between copies. Windows rebuilds a `.bmp` from
-`CF_DIB` and strips the `CF_HTML` header, so a screenshot and a rich-text copy
-arrive as the same mime types they would on Linux.
-
-### macOS — socket-activated under launchd
-
-`daemon/launchd/io.nddev.rldyour-clipboardd.plist` is the service manager
-piece; `launchd` starts the daemon on the first connection and it exits when
-idle, exactly like the systemd unit on Linux:
+Choose the release matching your architecture (`arm64` or `x86_64`), or build
+from source with Rust 1.95+ and Swift 6.
 
 ```sh
-install -d ~/Library/Application\ Support/rldyour-clipboard ~/.local/bin \
-    ~/Library/LaunchAgents
-cargo build --release --locked --manifest-path daemon/Cargo.toml
-cp daemon/target/release/rldyour-clipboardd ~/.local/bin/
-sed "s|@HOME@|${HOME}|g" \
-    daemon/launchd/io.nddev.rldyour-clipboardd.plist \
-    > ~/Library/LaunchAgents/io.nddev.rldyour-clipboardd.plist
-launchctl bootstrap gui/"$(id -u)" \
-    ~/Library/LaunchAgents/io.nddev.rldyour-clipboardd.plist
+./install-macos.sh
 ```
 
-### Windows — resident, started at sign-in
+Two login agents run native capture and the AppKit menu. Click the clipboard
+icon in the menu bar, search Recent or Pinned, and use the pin button to keep a
+record. Choosing a row restores portable text/HTML/RTF/image representations
+or multiple file URLs to the system clipboard; press **⌘V** in your application
+to paste. No Accessibility permission is required. The client queries only
+while you open/search/page the menu and marks restored content autogenerated
+to avoid immediately recording a duplicate. `./uninstall-macos.sh` removes
+code and agents, preserving the archive.
 
-Windows has no per-user socket activation, so the daemon binds its own socket
-under `%LOCALAPPDATA%` and stays resident; the Run key starts it at sign-in:
+## Windows
+
+The daemon captures using `AddClipboardFormatListener`, without polling. It
+normalizes CF_HTML, CF_DIB and file references into portable MIME formats.
+The Windows release contains the daemon; there is no Windows history GUI yet.
+Create `%LOCALAPPDATA%\rldyour-clipboard`, copy the executable there and register
+it under the current user's `Run` key to start at sign-in:
 
 ```powershell
-cargo build --release --locked --manifest-path daemon/Cargo.toml
-copy daemon\target\release\rldyour-clipboardd.exe "$env:LOCALAPPDATA\rldyour-clipboard\"
 reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" `
     /v rldyour-clipboardd /t REG_SZ /f `
     /d "$env:LOCALAPPDATA\rldyour-clipboard\rldyour-clipboardd.exe"
 ```
 
-Then either sign out and back in, or run the binary once by hand.
-
 ## Configuration
 
-The extension's preferences cover what most people change: whether to record at
-all, whether to paste on select, the largest item to keep, excluded
-applications, and which applications paste with Ctrl+Shift+V.
-
-The archive itself belongs to the daemon, and is set in its service file
-(`~/.config/systemd/user/rldyour-clipboardd.service`):
+Configure the daemon's environment in its user service/agent; restart only the
+daemon afterwards. Defaults apply to existing archives on upgrade too.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RLDYOUR_CLIPBOARD_BUDGET` | `5368709120` | Bytes before the oldest unpinned entries are evicted; `0` means no budget |
-| `RLDYOUR_CLIPBOARD_HOME` | the platform data directory | Where the archive lives |
+| `RLDYOUR_CLIPBOARD_RETENTION_DAYS` | `7` | Unpinned lifetime; `0` disables age cleanup |
+| `RLDYOUR_CLIPBOARD_BUDGET` | `5368709120` | Disk bytes; `0` disables budget eviction |
+| `RLDYOUR_CLIPBOARD_HOME` | Platform data directory | Relocates archive and socket together |
+| `RLDYOUR_CLIPBOARD_CAPTURE` | enabled | `0` disables native capture for isolated tests |
 
-## Where the archive lives
-
-| Platform | Directory |
+| Platform | Archive |
 |---|---|
 | Linux | `~/.local/share/rldyour-clipboard` |
 | macOS | `~/Library/Application Support/rldyour-clipboard` |
 | Windows | `%LOCALAPPDATA%\rldyour-clipboard` |
 
-`index.db` is SQLite and holds metadata and the full-text index; `blobs/`
-holds each representation once, named by the digest of its content. Deleting
-that directory deletes the archive and nothing else.
+SQLite holds metadata and full-text search; `blobs/` holds immutable content by
+digest. An exclusive archive lock prevents a second daemon touching the same
+store. Linux normally uses a runtime socket managed by systemd; macOS uses a
+launchd listener and starts capture at login. A manager-owned daemon idle-exits
+only when no native watcher is active. Keep the archive on a local filesystem.
 
-## Protocol
+## Protocol and CLI
 
-Newline-delimited JSON control frames over a per-user socket at mode 0600 — the
-archive holds everything you have ever copied, so the socket is the whole
-security boundary. A frame declaring `bytes` is followed by exactly that many
-raw bytes, never base64-encoded and never buffered whole.
-
-```json
-{"op":"list","req":5,"limit":50,"query":"rebase"}
-{"ev":"list","req":5,"items":[
-  {"id":42,"kind":"image","mimes":["image/png"],"bytes":184320,
-   "preview":null,"width":1920,"height":1080,"thumb":true,
-   "pinned":false,"source":"firefox","at":1789456123}]}
-```
-
-[`docs/protocol.md`](docs/protocol.md) is the full specification every client
-implements. Python clients can use `pip install rldyour-clipboard`:
+[The protocol specification](docs/protocol.md) describes version 1. Optional
+`watch:false`, retention metadata and pagination `more` are compatible additions.
+Python/CLI uses standard Unix sockets on Linux/macOS (CPython does not expose
+AF_UNIX on Windows); Windows clients can use .NET Unix-domain sockets instead.
 
 ```sh
-rldyour-clipboard list
-rldyour-clipboard list --favorites   # the durable prompt store
-rldyour-clipboard pin 42             # star an entry from a script
-rldyour-clipboard get 42 > screenshot.png
+uv tool install ./rldyour_clipboard-0.2.0-py3-none-any.whl
+rldyour-clipboard list --favorites
+rldyour-clipboard pin 42
+rldyour-clipboard unpin 42
+rldyour-clipboard get 42 > restored.png
 ```
 
-## Checks
+`get` streams output; the Python `Client.fetch()` convenience method returns
+bytes, while `fetch_to()` streams to a destination. `clear` keeps pins;
+explicit `remove` can delete a pinned record.
+
+## Validation
 
 ```sh
-./scripts/check-extension.sh                  # what CI runs for the extension
-./scripts/check-consistency.sh                # the facts that exist twice
-gjs -m extension/tests/smoke.js               # the extension's own logic
-cd daemon && cargo test && cargo clippy --all-targets --all-features -- -D warnings
-./scripts/e2e-sample.py                       # against a running daemon
+./scripts/check-version.sh
+./scripts/check-consistency.sh
+./scripts/check-extension.sh
+cargo test --locked --all-features --manifest-path daemon/Cargo.toml
+cargo clippy --locked --all-targets --all-features --manifest-path daemon/Cargo.toml -- -D warnings
+PYTHONPATH=python/src uv run --no-project --with pytest==9.1.1 pytest python/tests
+PYTHONPATH=python/src python3 scripts/retention-e2e.py
 ```
 
-`check-extension.sh` covers syntax, metadata, the settings keys the code
-actually reads, process isolation between the shell and preferences processes,
-deprecated modules, style classes without rules — and two rules specific to
-this extension: that no synchronous stream call reaches the shell process, and
-that the three APIs which changed between GNOME 46 and 50 (`orientation`,
-`vertical`, `set_bytes`) are named only inside the compatibility shim. Each of
-those three throws rather than degrading, so getting one wrong costs a session
-rather than a layout. None of it needs a running shell, which matters because
-Wayland gives no way to reload extension code without a new login.
-
-`check-consistency.sh` compares the things that genuinely have to exist twice:
-the mime preference table and the password-manager hints, which the extension
-uses to decide what to capture and the daemon uses to decide what to serve
-back; and the protocol version, socket name and frame limit, which are written
-out in Rust, JavaScript, Python and a systemd unit.
-
-The macOS and Windows capture backends cannot be compiled from a Linux
-workstation — the bundled SQLite needs a C toolchain for the target — so CI on
-real runners is what proves them.
+Integration tests require a release build. Use a short, isolated temporary
+`RLDYOUR_CLIPBOARD_HOME` and `RLDYOUR_CLIPBOARD_CAPTURE=0` for all test daemons.
+Never run fixtures against a user's archive or OS clipboard. CI checks Linux,
+macOS ARM/Intel, Windows, minimum Rust, GNOME transport and dependency advisories.
+See [quality notes](docs/quality.md) for limits and research sources.
 
 ## Licence
 
-AGPL-3.0-or-later.
-
-This places the extension outside what extensions.gnome.org accepts: the portal
-requires every extension to be distributable under GPL-2.0-or-later, which
-AGPL-3.0 is not compatible with, and separately forbids shipping binaries,
-which this project needs. Distribution is from this repository.
+AGPL-3.0-or-later. Releases are distributed by this repository.

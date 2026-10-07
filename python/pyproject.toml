@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling>=1.27"]
+requires = ["hatchling==1.32.4"]
 build-backend = "hatchling.build"
 
 [project]
 name = "rldyour-clipboard"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python client for the rldyour-clipboard archive daemon"
 readme = "README.md"
 requires-python = ">=3.9"

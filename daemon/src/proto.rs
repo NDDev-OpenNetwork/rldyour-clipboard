@@ -48,6 +48,8 @@ pub enum Request {
         v: u32,
         #[serde(default)]
         role: Role,
+        #[serde(default = "default_watch")]
+        watch: bool,
     },
     Begin {
         req: u64,
@@ -124,6 +126,10 @@ pub enum Request {
     },
 }
 
+fn default_watch() -> bool {
+    true
+}
+
 impl Request {
     /// The request id to quote in the answer, when the frame carries one.
     ///
@@ -164,7 +170,7 @@ pub struct Summary {
     pub at: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "ev", rename_all = "lowercase")]
 pub enum Response {
     Hello {
@@ -172,6 +178,7 @@ pub enum Response {
         entries: i64,
         bytes: i64,
         budget: i64,
+        retention_days: Option<u64>,
     },
     Ok {
         req: u64,
@@ -188,6 +195,7 @@ pub enum Response {
     List {
         req: u64,
         items: Vec<Summary>,
+        more: bool,
     },
     /// Always followed by `bytes` raw bytes.
     Blob {
@@ -215,6 +223,7 @@ pub enum Response {
         pinned: i64,
         bytes: i64,
         budget: i64,
+        retention_days: Option<u64>,
     },
     Added {
         entry: Summary,
@@ -288,7 +297,8 @@ mod tests {
             decode(r#"{"op":"hello","v":1,"role":"capture"}"#).unwrap(),
             Request::Hello {
                 v: 1,
-                role: Role::Capture
+                role: Role::Capture,
+                watch: true,
             }
         ));
         // The role is optional and a browsing client is the sensible default.

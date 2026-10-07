@@ -37,6 +37,9 @@ pub struct Store {
     blobs: Blobs,
     index: Mutex<Index>,
     budget: i64,
+    retention_seconds: Option<i64>,
+    _archive_lock: std::fs::File,
+    image_work: Mutex<()>,
 }
 
 /// One representation a draft has accepted.
@@ -44,6 +47,12 @@ pub struct Accepted {
     pub mime: String,
     pub digest: String,
     pub bytes: u64,
+    _lease: blobs::Lease,
+}
+
+struct Derived {
+    facts: Facts,
+    thumbnail: Option<Written>,
 }
 
 /// What a commit did.
@@ -99,8 +108,33 @@ impl StoreError {
 type Result<T> = std::result::Result<T, StoreError>;
 
 impl Store {
+    #[cfg(test)]
     pub fn open(root: &Path, budget: i64) -> Result<Self> {
+        Self::open_with_policy(root, budget, Some(604_800))
+    }
+
+    pub fn open_with_policy(
+        root: &Path,
+        budget: i64,
+        retention_seconds: Option<i64>,
+    ) -> Result<Self> {
         std::fs::create_dir_all(root)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let archive_lock = options.open(root.join("daemon.lock"))?;
+        archive_lock
+            .try_lock()
+            .map_err(|error| io::Error::other(format!("archive already in use: {error}")))?;
         let blobs = Blobs::open(root.join("blobs"))?;
         // A daemon that died mid-transfer leaves a partial file behind. Now,
         // before anything else can be writing, is the only safe time to sweep.
@@ -111,6 +145,9 @@ impl Store {
             blobs,
             index: Mutex::new(index),
             budget,
+            retention_seconds,
+            _archive_lock: archive_lock,
+            image_work: Mutex::new(()),
         })
     }
 
@@ -118,11 +155,17 @@ impl Store {
         self.budget
     }
 
+    pub fn retention_days(&self) -> Option<u64> {
+        self.retention_seconds
+            .map(|seconds| (seconds / 86_400) as u64)
+    }
+
     /// Streams one representation of known length into the blob store.
     ///
     /// Deliberately takes no lock: this is the unbounded part of recording an
     /// entry, and a picker searching the archive must not wait behind it.
     pub fn accept(&self, mime: &str, source: &mut impl Read, bytes: u64) -> Result<Accepted> {
+        validate_mime(mime)?;
         // Compared in unsigned terms: a declared length above `i64::MAX`
         // would wrap to a negative number and slip past a signed check.
         if bytes > self.budget.max(0) as u64 {
@@ -130,11 +173,17 @@ impl Store {
             // archive to hold, and the caller still has to drain the payload.
             return Err(StoreError::TooLarge);
         }
-        let Written { digest, bytes, .. } = self.blobs.write_from(source, bytes)?;
+        let Written {
+            digest,
+            bytes,
+            lease,
+            ..
+        } = self.blobs.write_from(source, bytes)?;
         Ok(Accepted {
             mime: mime.to_string(),
             digest,
             bytes,
+            _lease: lease,
         })
     }
 
@@ -144,6 +193,7 @@ impl Store {
     /// is the only thing that can be done when nobody has said how much is
     /// coming.
     pub fn incoming(&self, mime: &str) -> Result<Incoming<'_>> {
+        validate_mime(mime)?;
         Ok(Incoming {
             writer: self.blobs.writer()?,
             mime: mime.to_string(),
@@ -167,6 +217,13 @@ impl Store {
         if kind::any_sensitive(accepted.iter().map(|part| part.mime.as_str())) {
             return Ok(None);
         }
+        let bytes = accepted
+            .iter()
+            .try_fold(0u64, |total, part| total.checked_add(part.bytes))
+            .ok_or(StoreError::TooLarge)?;
+        if bytes > self.budget.max(0) as u64 {
+            return Err(StoreError::TooLarge);
+        }
 
         let identity = identity(accepted);
         let parts: Vec<Part> = accepted
@@ -178,7 +235,7 @@ impl Store {
             })
             .collect();
 
-        let mut index = self.index.lock().expect("index lock");
+        let index = self.index.lock().expect("index lock");
 
         // Identical content already held: move it to the top of the list
         // instead of recording it twice. This is what keeps an application
@@ -194,21 +251,41 @@ impl Store {
                 evicted: Vec::new(),
             }));
         }
-
-        let mut facts = self.derive(accepted)?;
-        facts.source = source.map(str::to_string);
-        let entry = index.insert(&identity, &parts, &facts, at)?;
+        drop(index);
+        // Image decoding and file I/O do not belong under the index lock.
+        // Draft leases keep content alive while search and cleanup continue.
+        let mut derived = self.derive(accepted)?;
+        derived.facts.source = source.map(str::to_string);
+        let mut index = self.index.lock().expect("index lock");
+        let existing = index.touch(&identity, at)?;
+        let created = existing.is_none();
+        let entry = match existing {
+            Some(entry) => entry,
+            None => index.insert(&identity, &parts, &derived.facts, at)?,
+        };
         let summary = index
             .summary(entry)?
             .expect("an entry that was just inserted exists");
 
         let (orphaned, evicted) = index.evict_to(self.budget)?;
+        // Pinned bytes can exhaust the budget. A new unpinned entry may
+        // itself be evicted: acknowledge no entry instead of publishing a
+        // ghost row which cannot be fetched or pinned.
+        let retained = !evicted.contains(&entry);
         drop(index);
+        let unused_thumb = derived
+            .thumbnail
+            .as_ref()
+            .map(|written| written.digest.clone());
+        drop(derived);
         self.sweep(orphaned);
+        if let Some(digest) = unused_thumb {
+            self.sweep(vec![digest]);
+        }
 
         Ok(Some(Committed {
-            entry,
-            created: true,
+            entry: if retained { entry } else { 0 },
+            created: created && retained,
             summary,
             evicted,
         }))
@@ -216,8 +293,9 @@ impl Store {
 
     /// Reads back enough of the content to describe the entry: a text sample
     /// for the preview and search, and a thumbnail for a picture.
-    fn derive(&self, accepted: &[Accepted]) -> Result<Facts> {
+    fn derive(&self, accepted: &[Accepted]) -> Result<Derived> {
         let mut facts = Facts::default();
+        let mut thumbnail = None;
 
         if let Some(part) = self.best(accepted, kind::is_text) {
             let text = self.read_text(&part.digest, INDEXED_TEXT)?;
@@ -225,28 +303,30 @@ impl Store {
             facts.body = Some(text);
         }
 
-        if let Some(part) = self.best(accepted, kind::is_image) {
-            if part.bytes <= THUMBNAILED_IMAGE {
-                let mut content = Vec::with_capacity(part.bytes as usize);
-                self.blobs
-                    .open_read(&part.digest)?
-                    .take(part.bytes)
-                    .read_to_end(&mut content)?;
-                let made = thumb::make(&content);
-                facts.width = made.width;
-                facts.height = made.height;
-                if let Some(png) = made.png {
-                    let written = self.blobs.write_bytes(&png)?;
-                    facts.thumb = Some(Part {
-                        mime: "image/png".into(),
-                        digest: written.digest,
-                        bytes: written.bytes,
-                    });
-                }
+        if let Some(part) = self.best(accepted, kind::is_image)
+            && part.bytes <= THUMBNAILED_IMAGE
+        {
+            let _image_work = self.image_work.lock().expect("image work lock");
+            let mut content = Vec::with_capacity(part.bytes as usize);
+            self.blobs
+                .open_read(&part.digest)?
+                .take(part.bytes)
+                .read_to_end(&mut content)?;
+            let made = thumb::make(&content);
+            facts.width = made.width;
+            facts.height = made.height;
+            if let Some(png) = made.png {
+                let written = self.blobs.write_bytes(&png)?;
+                facts.thumb = Some(Part {
+                    mime: "image/png".into(),
+                    digest: written.digest.clone(),
+                    bytes: written.bytes,
+                });
+                thumbnail = Some(written);
             }
         }
 
-        Ok(facts)
+        Ok(Derived { facts, thumbnail })
     }
 
     /// The most preferred representation matching a predicate.
@@ -303,12 +383,19 @@ impl Store {
     ) -> Result<Option<(String, std::fs::File, u64)>> {
         let located = {
             let index = self.index.lock().expect("index lock");
-            index.locate(entry, mime)?
+            index
+                .locate(entry, mime)?
+                .map(|(mime, digest, bytes)| {
+                    self.blobs
+                        .open_read(&digest)
+                        .map(|file| (mime, file, bytes))
+                })
+                .transpose()?
         };
-        let Some((mime, digest, bytes)) = located else {
+        let Some((mime, file, bytes)) = located else {
             return Ok(None);
         };
-        Ok(Some((mime, self.blobs.open_read(&digest)?, bytes)))
+        Ok(Some((mime, file, bytes)))
     }
 
     /// Produces a representation the entry does not literally hold.
@@ -320,24 +407,39 @@ impl Store {
     /// call — a fetch never writes back into the archive — and a build without
     /// `thumbnails` answers `None`, which the caller turns into the ordinary
     /// `no-such-mime`.
-    pub fn transcode(&self, entry: i64, mime: &str) -> Result<Option<(String, Vec<u8>)>> {
+    pub fn transcode(
+        &self,
+        entry: i64,
+        mime: &str,
+    ) -> Result<Option<(String, blobs::ScratchFile, u64)>> {
         if !mime.eq_ignore_ascii_case("image/bmp") {
             return Ok(None);
         }
         let located = {
             let index = self.index.lock().expect("index lock");
-            index.locate_prefixed(entry, "image/")?
+            index
+                .locate_prefixed(entry, "image/")?
+                .map(|(_, digest, bytes)| self.blobs.open_read(&digest).map(|file| (file, bytes)))
+                .transpose()?
         };
-        let Some((_, digest, bytes)) = located else {
+        let Some((file, bytes)) = located else {
             return Ok(None);
         };
+        if bytes > THUMBNAILED_IMAGE {
+            return Ok(None);
+        }
 
+        let _image_work = self.image_work.lock().expect("image work lock");
         let mut content = Vec::with_capacity(bytes as usize);
-        self.blobs
-            .open_read(&digest)?
-            .take(bytes)
-            .read_to_end(&mut content)?;
-        Ok(thumb::to_bmp(&content).map(|bmp| ("image/bmp".to_string(), bmp)))
+        file.take(bytes).read_to_end(&mut content)?;
+        let mut scratch = self.blobs.scratch()?;
+        if !thumb::write_bmp(&content, &mut scratch.file) {
+            return Ok(None);
+        }
+        let bytes = scratch.file.metadata()?.len();
+        use std::io::{Seek, SeekFrom};
+        scratch.file.seek(SeekFrom::Start(0))?;
+        Ok(Some(("image/bmp".to_string(), scratch, bytes)))
     }
 
     /// The thumbnail for an entry, decoded into pixels ready to upload.
@@ -348,17 +450,20 @@ impl Store {
     pub fn thumbnail(&self, entry: i64) -> Result<Option<thumb::Pixels>> {
         let located = {
             let index = self.index.lock().expect("index lock");
-            index.thumb(entry)?
+            index
+                .thumb(entry)?
+                .map(|(digest, bytes)| self.blobs.open_read(&digest).map(|file| (file, bytes)))
+                .transpose()?
         };
-        let Some((digest, bytes)) = located else {
+        let Some((file, bytes)) = located else {
             return Ok(None);
         };
 
+        if bytes > 4 * 1024 * 1024 {
+            return Ok(None);
+        }
         let mut png = Vec::with_capacity(bytes as usize);
-        self.blobs
-            .open_read(&digest)?
-            .take(bytes)
-            .read_to_end(&mut png)?;
+        file.take(bytes).read_to_end(&mut png)?;
         // A thumbnail that will not decode is one the UI draws a kind icon
         // for; it is not worth failing the request over.
         Ok(thumb::decode(&png))
@@ -407,11 +512,38 @@ impl Store {
     /// next startup reclaims; a file deleted too early would be a hole in the
     /// archive, so the order is not interchangeable.
     fn sweep(&self, orphaned: Vec<String>) {
+        let index = self.index.lock().expect("index lock");
         for digest in orphaned {
+            match index.references(&digest) {
+                Ok(false) => {}
+                Ok(true) => continue,
+                Err(error) => {
+                    eprintln!("rldyour-clipboardd: blob collection deferred: {error}");
+                    continue;
+                }
+            }
             if let Err(error) = self.blobs.remove(&digest) {
                 eprintln!("rldyour-clipboardd: could not remove blob {digest}: {error}");
             }
         }
+    }
+
+    pub fn discard(&self, parts: Vec<Accepted>) {
+        let digests = parts.iter().map(|part| part.digest.clone()).collect();
+        drop(parts);
+        self.sweep(digests);
+    }
+
+    /// Automatic expiry deletes only unpinned rows older than the strict
+    /// cutoff, in bounded batches using the existing recent-order index.
+    pub fn expire_before(&self, cutoff: i64) -> Result<Vec<i64>> {
+        let (orphaned, removed) = self
+            .index
+            .lock()
+            .expect("index lock")
+            .expire_before(cutoff, 256)?;
+        self.sweep(orphaned);
+        Ok(removed)
     }
 
     /// Deletes blob files no index record points at.
@@ -419,10 +551,8 @@ impl Store {
     /// Only a crash between a commit and its sweep can leave one, so this runs
     /// at startup and never again.
     pub fn reconcile(&self, root: &Path) -> Result<u64> {
-        let known: std::collections::HashSet<String> = {
-            let index = self.index.lock().expect("index lock");
-            index.known_digests()?.into_iter().collect()
-        };
+        let index = self.index.lock().expect("index lock");
+        let known: std::collections::HashSet<String> = index.known_digests()?.into_iter().collect();
 
         let mut reclaimed = 0;
         let blob_root = root.join("blobs");
@@ -441,13 +571,25 @@ impl Store {
                 };
                 let digest = format!("{prefix}{rest}");
                 if !known.contains(&digest) {
-                    reclaimed += blob.metadata().map(|meta| meta.len()).unwrap_or(0);
-                    let _ = std::fs::remove_file(blob.path());
+                    let bytes = blob.metadata().map(|meta| meta.len()).unwrap_or(0);
+                    if self.blobs.remove(&digest)? {
+                        reclaimed += bytes;
+                    }
                 }
             }
         }
         Ok(reclaimed)
     }
+}
+
+fn validate_mime(mime: &str) -> io::Result<()> {
+    if mime.is_empty() || mime.len() > 256 || !mime.bytes().all(|byte| (32..=126).contains(&byte)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid clipboard mime metadata",
+        ));
+    }
+    Ok(())
 }
 
 /// A representation being streamed in without a declared length.
@@ -470,11 +612,17 @@ impl Incoming<'_> {
     }
 
     pub fn finish(self) -> Result<Accepted> {
-        let Written { digest, bytes, .. } = self.writer.finish()?;
+        let Written {
+            digest,
+            bytes,
+            lease,
+            ..
+        } = self.writer.finish()?;
         Ok(Accepted {
             mime: self.mime,
             digest,
             bytes,
+            _lease: lease,
         })
     }
 }
@@ -706,6 +854,24 @@ mod tests {
     }
 
     #[test]
+    fn a_pin_that_exhausts_the_budget_cannot_create_a_ghost_entry() {
+        let (store, _dir) = store(4);
+        let kept = store
+            .commit(&[accept(&store, "text/plain", b"keep")], None, 100)
+            .unwrap()
+            .unwrap();
+        store.set_pinned(kept.entry, true).unwrap();
+        let discarded = store
+            .commit(&[accept(&store, "text/plain", b"drop")], None, 200)
+            .unwrap()
+            .unwrap();
+        assert_eq!(discarded.entry, 0);
+        assert!(!discarded.created);
+        assert_eq!(store.stats().unwrap().0, 1);
+        assert!(store.summary(kept.entry).unwrap().unwrap().pinned);
+    }
+
+    #[test]
     fn a_pinned_entry_survives_a_clear() {
         let (store, _dir) = store(DEFAULT_BUDGET);
         let kept = store
@@ -754,9 +920,127 @@ mod tests {
         // the two leaves behind.
         let stranded = accept(&store, "text/plain", b"never committed");
         assert!(store.blobs.exists(&stranded.digest));
+        let digest = stranded.digest.clone();
+        assert_eq!(
+            store.reconcile(dir.path()).unwrap(),
+            0,
+            "live drafts are protected"
+        );
+        drop(stranded);
 
         let reclaimed = store.reconcile(dir.path()).unwrap();
         assert_eq!(reclaimed, 15);
-        assert!(!store.blobs.exists(&stranded.digest));
+        assert!(!store.blobs.exists(&digest));
+    }
+
+    #[test]
+    fn retention_is_strict_and_preserves_pins_search_and_shared_content() {
+        let (store, _dir) = store(DEFAULT_BUDGET);
+        let shared = accept(&store, "text/plain", b"shared synthetic text");
+        let old = store.commit(&[shared], None, 99).unwrap().unwrap().entry;
+        let kept = store
+            .commit(&[accept(&store, "text/plain", b"keep synthetic")], None, 1)
+            .unwrap()
+            .unwrap()
+            .entry;
+        store.set_pinned(kept, true).unwrap();
+        let boundary = store
+            .commit(&[accept(&store, "text/plain", b"boundary")], None, 100)
+            .unwrap()
+            .unwrap()
+            .entry;
+
+        // A new representation set references the same physical text blob.
+        let recent = store
+            .commit(
+                &[
+                    accept(&store, "text/plain", b"shared synthetic text"),
+                    accept(&store, "text/html", b"<b>shared</b>"),
+                ],
+                None,
+                101,
+            )
+            .unwrap()
+            .unwrap()
+            .entry;
+        assert_eq!(store.expire_before(100).unwrap(), vec![old]);
+        assert!(store.summary(old).unwrap().is_none());
+        assert!(store.summary(kept).unwrap().unwrap().pinned);
+        assert!(store.summary(boundary).unwrap().is_some());
+        let (_, mut file, _) = store
+            .open_part(recent, Some("text/plain"))
+            .unwrap()
+            .unwrap();
+        let mut data = Vec::new();
+        file.read_to_end(&mut data).unwrap();
+        assert_eq!(data, b"shared synthetic text");
+        assert_eq!(
+            store
+                .list(10, None, Some("shared"), None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        store.set_pinned(kept, false).unwrap();
+        assert_eq!(store.expire_before(100).unwrap(), vec![kept]);
+    }
+
+    #[test]
+    fn expiry_cannot_delete_a_draft_waiting_to_republish_shared_bytes() {
+        let (store, _dir) = store(DEFAULT_BUDGET);
+        store
+            .commit(&[accept(&store, "text/plain", b"same blob")], None, 1)
+            .unwrap();
+        let pending = accept(&store, "text/plain", b"same blob");
+        assert_eq!(store.expire_before(2).unwrap().len(), 1);
+        assert!(store.blobs.exists(&pending.digest));
+        let fresh = store.commit(&[pending], None, 3).unwrap().unwrap().entry;
+        assert!(store.open_part(fresh, None).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_stale_collection_list_cannot_delete_a_new_index_reference() {
+        let (store, _dir) = store(DEFAULT_BUDGET);
+        let part = accept(&store, "text/plain", b"re-published");
+        let digest = part.digest.clone();
+        let entry = store.commit(&[part], None, 3).unwrap().unwrap().entry;
+        store.sweep(vec![digest]);
+        assert!(store.open_part(entry, None).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_second_store_cannot_sweep_a_live_archives_incoming_files() {
+        let (store, dir) = store(DEFAULT_BUDGET);
+        let mut incoming = store.incoming("text/plain").unwrap();
+        incoming.absorb(&mut io::Cursor::new(b"draft"), 5).unwrap();
+        assert!(Store::open(dir.path(), DEFAULT_BUDGET).is_err());
+        let part = incoming.finish().unwrap();
+        assert_eq!(part.bytes, 5);
+    }
+
+    #[test]
+    fn recopy_renews_retention_and_the_batch_is_bounded() {
+        let (store, _dir) = store(DEFAULT_BUDGET);
+        for i in 0..300 {
+            store
+                .commit(
+                    &[accept(
+                        &store,
+                        "text/plain",
+                        format!("entry {i}").as_bytes(),
+                    )],
+                    None,
+                    i,
+                )
+                .unwrap();
+        }
+        let renewed = store
+            .commit(&[accept(&store, "text/plain", b"entry 0")], None, 1000)
+            .unwrap()
+            .unwrap()
+            .entry;
+        assert_eq!(store.expire_before(500).unwrap().len(), 256);
+        assert_eq!(store.expire_before(500).unwrap().len(), 43);
+        assert!(store.summary(renewed).unwrap().is_some());
     }
 }

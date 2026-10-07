@@ -3,6 +3,27 @@
 All notable changes to this project are documented here. The daemon, the
 Python client and this file are released together and carry the same version.
 
+## 0.2.0 — 2026-10-07
+
+- Unpinned history expires seven days after its latest capture; pins survive
+  age cleanup, budget eviction, clear and daemon restart. Startup and periodic
+  cleanup are bounded, transactional and also remove unreferenced blobs/FTS.
+- Native macOS 12+ AppKit menu: search, Recent/Pinned tabs, paging, pin toggle,
+  and restore to the clipboard for manual ⌘V. Login agents start capture and UI.
+  Multi-file references and portable rich-text/image formats are preserved.
+- Modular daemon policy, serving, maintenance and storage. Archive locks and
+  blob leases prevent duplicate-daemon and cleanup/publication races; decoding
+  runs outside the index lock. Budget eviction uses one transaction and sum.
+- Bounded, asynchronous watcher queues prevent a slow UI from blocking capture.
+  Control frames, connections, drafts, representation counts and image decoding
+  are bounded. Large restore/transcode payloads use private temporary files.
+- GNOME transport handles short writes and binary framing, serializes complete
+  multipart writes and guards stale reconnects. Python CLI streams `get`.
+  Query clients can opt out of broadcasts without changing protocol version 1.
+- Updated Rust dependencies, bundled SQLite 3.53.2 and MSRV 1.95; native macOS
+  ARM/Intel, Linux and Windows checks plus retention/restart integration tests.
+  Release archives include installers and SHA-256 checksums.
+
 ## 0.1.0
 
 First release.

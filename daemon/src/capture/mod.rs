@@ -100,16 +100,31 @@ impl Recorder {
     ///
     /// Secrets and empty events are dropped by the store, so a backend can
     /// pass on whatever the platform offered without deciding anything.
+    #[cfg(not(target_os = "macos"))]
     pub fn record(&self, parts: Vec<(String, Vec<u8>)>, source: Option<&str>) {
-        if parts.is_empty() {
+        self.record_borrowed(
+            parts
+                .iter()
+                .map(|(mime, bytes)| (mime.as_str(), bytes.as_slice())),
+            source,
+        );
+    }
+
+    pub fn record_borrowed<'a>(
+        &self,
+        parts: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+        source: Option<&str>,
+    ) {
+        let parts: Vec<_> = parts.into_iter().collect();
+        if parts.is_empty() || crate::kind::any_sensitive(parts.iter().map(|(mime, _)| *mime)) {
             return;
         }
 
         let mut accepted = Vec::with_capacity(parts.len());
         for (mime, content) in parts {
             match self.store.accept(
-                &mime,
-                &mut std::io::Cursor::new(&content),
+                mime,
+                &mut std::io::Cursor::new(content),
                 content.len() as u64,
             ) {
                 Ok(part) => accepted.push(part),
@@ -131,20 +146,23 @@ impl Recorder {
                     self.watchers
                         .broadcast(&Response::Removed { entry: evicted });
                 }
-                let event = if done.created {
-                    Response::Added {
-                        entry: done.summary,
-                    }
-                } else {
-                    Response::Updated {
-                        entry: done.summary,
-                    }
-                };
-                self.watchers.broadcast(&event);
+                if done.entry != 0 {
+                    let event = if done.created {
+                        Response::Added {
+                            entry: done.summary,
+                        }
+                    } else {
+                        Response::Updated {
+                            entry: done.summary,
+                        }
+                    };
+                    self.watchers.broadcast(&event);
+                }
             }
             // Empty, or a secret the store refused. Nothing to announce.
             Ok(None) => {}
             Err(error) => eprintln!("rldyour-clipboardd: could not archive a copy: {error}"),
         }
+        self.store.discard(accepted);
     }
 }

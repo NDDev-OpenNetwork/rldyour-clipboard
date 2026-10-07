@@ -81,6 +81,7 @@ pub fn any_sensitive<'a>(mimes: impl IntoIterator<Item = &'a str>) -> bool {
 /// one would archive a list of target names as though it were something
 /// copied. The daemon-side X11 watcher needs the same list the extension's
 /// `mimes.js` carries; `scripts/check-consistency.sh` compares them.
+#[cfg(any(not(target_os = "macos"), test))]
 const PROTOCOL_TARGETS: &[&str] = &[
     "targets",
     "timestamp",
@@ -108,6 +109,7 @@ pub const MAX_REPRESENTATIONS: usize = 8;
 /// unknown bare atoms are dropped, what remains is ranked and capped. The two
 /// have to agree or the same copy would archive differently depending on
 /// which watcher saw it.
+#[cfg(any(not(target_os = "macos"), test))]
 pub fn recordable(offered: &[String]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut wanted: Vec<String> = Vec::new();
@@ -134,6 +136,7 @@ pub fn recordable(offered: &[String]) -> Vec<String> {
 }
 
 /// The bare X11 atoms the rank table knows, for `recordable`'s slash test.
+#[cfg(any(not(target_os = "macos"), test))]
 const RANKED_BARE: &[&str] = &["utf8_string", "string", "text"];
 
 /// Serving preference, lowest first.

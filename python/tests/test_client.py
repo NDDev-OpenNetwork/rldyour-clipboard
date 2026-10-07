@@ -340,3 +340,14 @@ def test_favorites_ask_for_pinned_entries():
         assert listing == {"op": "list", "req": 1, "limit": 50, "pinned": True}
     finally:
         stub.close()
+
+
+def test_query_clients_can_skip_broadcasts():
+    stub = StubDaemon([HELLO])
+    try:
+        with Client(path=stub.path, watch=False):
+            pass
+        stub.wait_for(1)
+        assert stub.received[0]["watch"] is False
+    finally:
+        stub.close()

@@ -386,11 +386,20 @@ impl Index {
     }
 
     pub fn set_pinned(&self, entry: i64, pinned: bool) -> rusqlite::Result<bool> {
+        // Pinning is infrequent and explicitly durable: sync this commit's
+        // WAL rather than paying FULL fsync for every ordinary clipboard copy.
+        if pinned {
+            self.connection.pragma_update(None, "synchronous", "FULL")?;
+        }
         let changed = self.connection.execute(
             "UPDATE entry SET pinned = ?2 WHERE id = ?1",
             params![entry, pinned as i32],
-        )?;
-        Ok(changed > 0)
+        );
+        if pinned {
+            self.connection
+                .pragma_update(None, "synchronous", "NORMAL")?;
+        }
+        changed.map(|changed| changed > 0)
     }
 
     /// Deletes one entry, returning the digests no record points at any more.
@@ -401,7 +410,11 @@ impl Index {
         transaction.execute("DELETE FROM entry_fts WHERE rowid = ?1", params![entry])?;
         transaction.commit()?;
 
-        Ok(if existed > 0 { orphaned } else { Vec::new() })
+        Ok(if existed > 0 {
+            orphaned.digests
+        } else {
+            Vec::new()
+        })
     }
 
     /// Deletes everything not pinned.
@@ -415,7 +428,7 @@ impl Index {
 
         let mut orphaned = Vec::new();
         for entry in doomed {
-            orphaned.extend(release_entry(&transaction, entry)?);
+            orphaned.extend(release_entry(&transaction, entry)?.digests);
             transaction.execute("DELETE FROM entry WHERE id = ?1", params![entry])?;
             transaction.execute("DELETE FROM entry_fts WHERE rowid = ?1", params![entry])?;
         }
@@ -428,17 +441,21 @@ impl Index {
     /// Returns the orphaned digests and the ids that were removed, so the
     /// daemon can tell watching clients what disappeared under them.
     pub fn evict_to(&mut self, budget: i64) -> rusqlite::Result<(Vec<String>, Vec<i64>)> {
+        let mut used = self.bytes()?;
+        if used <= budget {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let transaction = self.connection.transaction()?;
         let mut orphaned = Vec::new();
         let mut removed = Vec::new();
 
         loop {
-            if self.bytes()? <= budget {
+            if used <= budget {
                 break;
             }
             // Oldest first, and never a pinned one: pinning is the user saying
             // this outlives the budget.
-            let victim: Option<i64> = self
-                .connection
+            let victim: Option<i64> = transaction
                 .query_row(
                     "SELECT id FROM entry WHERE pinned = 0 ORDER BY at ASC, id ASC LIMIT 1",
                     [],
@@ -451,11 +468,50 @@ impl Index {
             // explicitly kept.
             let Some(victim) = victim else { break };
 
-            orphaned.extend(self.remove(victim)?);
+            let released = release_entry(&transaction, victim)?;
+            used = used.saturating_sub(released.bytes);
+            orphaned.extend(released.digests);
+            transaction.execute("DELETE FROM entry WHERE id = ?1", [victim])?;
+            transaction.execute("DELETE FROM entry_fts WHERE rowid = ?1", [victim])?;
             removed.push(victim);
         }
-
+        transaction.commit()?;
         Ok((orphaned, removed))
+    }
+
+    /// One bounded indexed expiry transaction; pinned rows never qualify.
+    /// Repeated passes yield the index lock between batches rather than
+    /// blocking search for an entire large archive.
+    pub fn expire_before(
+        &mut self,
+        cutoff: i64,
+        batch: u32,
+    ) -> rusqlite::Result<(Vec<String>, Vec<i64>)> {
+        let transaction = self.connection.transaction()?;
+        let entries: Vec<i64> = {
+            let mut query = transaction.prepare_cached(
+                "SELECT id FROM entry WHERE pinned = 0 AND at < ?1 ORDER BY at, id LIMIT ?2",
+            )?;
+            query
+                .query_map(params![cutoff, batch], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let mut orphaned = Vec::new();
+        for entry in &entries {
+            orphaned.extend(release_entry(&transaction, *entry)?.digests);
+            transaction.execute("DELETE FROM entry WHERE id = ?1", [entry])?;
+            transaction.execute("DELETE FROM entry_fts WHERE rowid = ?1", [entry])?;
+        }
+        transaction.commit()?;
+        Ok((orphaned, entries))
+    }
+
+    pub fn references(&self, digest: &str) -> rusqlite::Result<bool> {
+        self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM blob WHERE digest = ?1 AND refs > 0)",
+            [digest],
+            |row| row.get(0),
+        )
     }
 
     pub fn entries(&self) -> rusqlite::Result<i64> {
@@ -499,7 +555,12 @@ fn reference(connection: &Connection, digest: &str, bytes: u64) -> rusqlite::Res
 
 /// Drops every reference one entry holds, returning the digests that fell to
 /// zero and whose files the caller should now delete.
-fn release_entry(connection: &Connection, entry: i64) -> rusqlite::Result<Vec<String>> {
+struct Released {
+    digests: Vec<String>,
+    bytes: i64,
+}
+
+fn release_entry(connection: &Connection, entry: i64) -> rusqlite::Result<Released> {
     let mut digests: Vec<String> = {
         let mut statement = connection.prepare("SELECT digest FROM part WHERE entry = ?1")?;
         let rows = statement.query_map(params![entry], |row| row.get(0))?;
@@ -516,6 +577,7 @@ fn release_entry(connection: &Connection, entry: i64) -> rusqlite::Result<Vec<St
     digests.extend(thumb);
 
     let mut orphaned = Vec::new();
+    let mut bytes = 0i64;
     for digest in digests {
         connection.execute(
             "UPDATE blob SET refs = refs - 1 WHERE digest = ?1",
@@ -524,21 +586,25 @@ fn release_entry(connection: &Connection, entry: i64) -> rusqlite::Result<Vec<St
         // A row that is already gone counts as zero: the entry is being
         // deleted either way, and failing here would abort the transaction
         // over an inconsistency the delete itself repairs.
-        let remaining: i64 = connection
+        let (remaining, size): (i64, i64) = connection
             .query_row(
-                "SELECT refs FROM blob WHERE digest = ?1",
+                "SELECT refs, bytes FROM blob WHERE digest = ?1",
                 params![&digest],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
-            .unwrap_or(0);
+            .unwrap_or((0, 0));
         if remaining <= 0 {
             connection.execute("DELETE FROM blob WHERE digest = ?1", params![&digest])?;
             orphaned.push(digest);
+            bytes = bytes.saturating_add(size);
         }
     }
 
-    Ok(orphaned)
+    Ok(Released {
+        digests: orphaned,
+        bytes,
+    })
 }
 
 fn read_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<Summary> {

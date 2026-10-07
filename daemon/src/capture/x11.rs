@@ -304,10 +304,10 @@ fn wait_event(
         }
         match connection.poll_for_event() {
             Ok(Some(event)) => {
-                if let Event::XfixesSelectionNotify(notify) = &event {
-                    if notify.selection == clipboard {
-                        *changed = true;
-                    }
+                if let Event::XfixesSelectionNotify(notify) = &event
+                    && notify.selection == clipboard
+                {
+                    *changed = true;
                 }
                 return Some(event);
             }

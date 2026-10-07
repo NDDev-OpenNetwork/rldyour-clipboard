@@ -15,12 +15,18 @@ EXT_DIR="${HOME}/.local/share/gnome-shell/extensions/${UUID}"
 
 say() { printf '\033[1m==>\033[0m %s\n' "$1"; }
 
-say "Building the daemon"
-cargo build --release --manifest-path "${ROOT}/daemon/Cargo.toml"
+if [[ -x "${ROOT}/prebuilt/rldyour-clipboardd" ]]; then
+  DAEMON="${ROOT}/prebuilt/rldyour-clipboardd"
+else
+  say "Building the daemon"
+  cargo build --release --locked --manifest-path "${ROOT}/daemon/Cargo.toml"
+  DAEMON="${ROOT}/daemon/target/release/rldyour-clipboardd"
+fi
 
 say "Installing the daemon into ${BIN_DIR}"
-install -Dm755 "${ROOT}/daemon/target/release/rldyour-clipboardd" \
-  "${BIN_DIR}/rldyour-clipboardd"
+install -Dm755 "${DAEMON}" \
+  "${BIN_DIR}/rldyour-clipboardd.new"
+mv -f "${BIN_DIR}/rldyour-clipboardd.new" "${BIN_DIR}/rldyour-clipboardd"
 
 say "Installing the user units into ${UNIT_DIR}"
 install -Dm644 "${ROOT}/daemon/systemd/rldyour-clipboardd.socket" \
@@ -30,7 +36,7 @@ install -Dm644 "${ROOT}/daemon/systemd/rldyour-clipboardd.service" \
 
 # The unit lists this directory as writable, so it has to exist before the
 # service is allowed to start.
-mkdir -p "${HOME}/.local/share/rldyour-clipboard"
+install -d -m700 "${HOME}/.local/share/rldyour-clipboard"
 
 say "Enabling the socket"
 systemctl --user daemon-reload
@@ -39,13 +45,15 @@ systemctl --user daemon-reload
 # it stays resident to keep capturing; otherwise it exits once nobody has
 # been connected for a while.
 systemctl --user enable --now rldyour-clipboardd.socket
+systemctl --user try-restart rldyour-clipboardd.service
 
 say "Installing the extension into ${EXT_DIR}"
-rm -rf "${EXT_DIR}"
+if [[ -L "${EXT_DIR}" ]]; then echo "Refusing a redirected extension path" >&2; exit 1; fi
+if [[ -d "${EXT_DIR}" ]]; then rm -r "${EXT_DIR}"; fi
 mkdir -p "${EXT_DIR}"
 cp -r "${ROOT}/extension/." "${EXT_DIR}/"
 # The extension payload matches the released zip: tests stay in the repo.
-rm -rf "${EXT_DIR}/tests"
+if [[ -d "${EXT_DIR}/tests" ]]; then rm -r "${EXT_DIR}/tests"; fi
 # The shell reads the compiled binary form, never the XML source.
 glib-compile-schemas "${EXT_DIR}/schemas"
 

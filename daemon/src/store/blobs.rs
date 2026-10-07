@@ -8,9 +8,11 @@
 //! it.
 
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 /// Big enough that a large paste is a few thousand syscalls rather than a
 /// million, small enough to stay in L2 and to never show up in the process's
@@ -24,12 +26,45 @@ const FANOUT: usize = 2;
 
 pub struct Blobs {
     root: PathBuf,
+    leases: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+pub struct ScratchFile {
+    pub file: File,
+    path: PathBuf,
+}
+impl Drop for ScratchFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// A draft's published blob cannot be collected before its index commit.
+/// The same gate serialises file publication with removal, so a re-copy and
+/// an expiry sweep cannot unlink each other's content-addressed file.
+pub struct Lease {
+    digest: String,
+    registry: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        if let Ok(mut leases) = self.registry.lock()
+            && let Some(count) = leases.get_mut(&self.digest)
+        {
+            *count -= 1;
+            if *count == 0 {
+                leases.remove(&self.digest);
+            }
+        }
+    }
 }
 
 /// What a completed streaming write turned out to be.
 pub struct Written {
     pub digest: String,
     pub bytes: u64,
+    pub lease: Lease,
     /// False when a blob with this digest was already stored, which is the
     /// common case for a clipboard that is re-asserted unchanged. Nothing acts
     /// on it yet; it is here because a write that stored nothing is a
@@ -42,22 +77,45 @@ impl Blobs {
     pub fn open(root: PathBuf) -> io::Result<Self> {
         fs::create_dir_all(&root)?;
         fs::create_dir_all(root.join("incoming"))?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            leases: Arc::new(Mutex::new(HashMap::new())),
+        })
     }
 
-    fn path(&self, digest: &str) -> PathBuf {
-        self.root.join(&digest[..FANOUT]).join(&digest[FANOUT..])
+    fn path(&self, digest: &str) -> io::Result<PathBuf> {
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid content digest",
+            ));
+        }
+        Ok(self.root.join(&digest[..FANOUT]).join(&digest[FANOUT..]))
     }
 
     /// Whether the store already holds this content. Used by the tests and by
     /// the startup reconciliation, both of which compare disk against index.
     #[cfg(test)]
     pub fn exists(&self, digest: &str) -> bool {
-        self.path(digest).exists()
+        self.path(digest).is_ok_and(|path| path.exists())
     }
 
     pub fn open_read(&self, digest: &str) -> io::Result<File> {
-        File::open(self.path(digest))
+        File::open(self.path(digest)?)
+    }
+
+    /// Private transient output, never published into the archive/index.
+    pub fn scratch(&self) -> io::Result<ScratchFile> {
+        let path = self.root.join("incoming").join(temporary_name());
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&path)?;
+        Ok(ScratchFile { file, path })
     }
 
     /// Copies exactly `bytes` from `source` into the store, naming the result
@@ -98,12 +156,19 @@ impl Blobs {
         self.write_from(&mut io::Cursor::new(content), content.len() as u64)
     }
 
-    pub fn remove(&self, digest: &str) -> io::Result<()> {
-        match fs::remove_file(self.path(digest)) {
-            Ok(()) => Ok(()),
+    pub fn remove(&self, digest: &str) -> io::Result<bool> {
+        let leases = self
+            .leases
+            .lock()
+            .map_err(|_| io::Error::other("blob lease lock poisoned"))?;
+        if leases.contains_key(digest) {
+            return Ok(false);
+        }
+        match fs::remove_file(self.path(digest)?) {
+            Ok(()) => Ok(true),
             // The index is the authority on what exists. A blob already gone
             // from the disk is the state the caller wanted.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error),
         }
     }
@@ -178,24 +243,41 @@ impl Writer<'_> {
 
         let digest = hex(&std::mem::take(&mut self.hasher).finalize());
         let bytes = self.bytes;
-        let destination = self.blobs.path(&digest);
+        let destination = self.blobs.path(&digest)?;
+        let mut leases = self
+            .blobs
+            .leases
+            .lock()
+            .map_err(|_| io::Error::other("blob lease lock poisoned"))?;
+        *leases.entry(digest.clone()).or_default() += 1;
+        let lease = Lease {
+            digest: digest.clone(),
+            registry: Arc::clone(&self.blobs.leases),
+        };
 
         if destination.exists() {
             let _ = fs::remove_file(&self.incoming);
             return Ok(Written {
                 digest,
                 bytes,
+                lease,
                 created: false,
             });
         }
 
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::rename(&self.incoming, &destination)?;
+        let published = (|| {
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::rename(&self.incoming, &destination)
+        })();
+        // Drop the gate before a failed publication drops its lease.
+        drop(leases);
+        published?;
         Ok(Written {
             digest,
             bytes,
+            lease,
             created: true,
         })
     }
@@ -205,9 +287,8 @@ impl Drop for Writer<'_> {
     fn drop(&mut self) {
         // Still holding the file means `finish` was never reached: the
         // transfer failed or the connection went. Nothing partial survives.
-        if self.file.take().is_some() {
-            let _ = fs::remove_file(&self.incoming);
-        }
+        self.file.take();
+        let _ = fs::remove_file(&self.incoming);
     }
 }
 
@@ -342,8 +423,14 @@ mod tests {
     fn removing_something_already_gone_is_not_an_error() {
         let (blobs, _dir) = store();
         let written = blobs.write_bytes(b"transient").unwrap();
-        blobs.remove(&written.digest).unwrap();
-        blobs.remove(&written.digest).unwrap();
-        assert!(!blobs.exists(&written.digest));
+        let digest = written.digest.clone();
+        assert!(
+            !blobs.remove(&digest).unwrap(),
+            "a live draft keeps its blob"
+        );
+        drop(written);
+        blobs.remove(&digest).unwrap();
+        blobs.remove(&digest).unwrap();
+        assert!(!blobs.exists(&digest));
     }
 }

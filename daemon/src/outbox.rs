@@ -1,110 +1,155 @@
-//! The writing half of a connection, and the list of connections that want to
-//! be told when the archive changes.
-//!
-//! Every write to a socket goes through one mutex held for the whole frame,
-//! payload included. Without that a broadcast could land in the middle of a
-//! blob a picker was reading, and the client would have no way to tell the two
-//! apart: the payload is opaque bytes and the frame is whatever follows them.
-
+//! Framed socket writes and bounded asynchronous archive notifications.
+//! Producers only enqueue events; a slow watcher cannot hold up capture,
+//! retention or another peer. A subscription owns and stops its writer worker.
 use crate::net::Stream;
-use crate::proto::Response;
+use crate::proto::{MAX_FRAME, Response};
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, Weak};
 
+struct Writer {
+    stream: Stream,
+    frame: Vec<u8>,
+}
 pub struct Outbox {
-    stream: Mutex<Stream>,
+    writer: Mutex<Writer>,
+    shutdown: Option<Stream>,
 }
 
 impl Outbox {
     pub fn new(stream: Stream) -> Self {
+        let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(2)));
+        let shutdown = stream.try_clone().ok();
         Self {
-            stream: Mutex::new(stream),
+            writer: Mutex::new(Writer {
+                stream,
+                frame: Vec::with_capacity(1024),
+            }),
+            shutdown,
         }
     }
-
-    /// Writes one frame.
-    pub fn send(&self, response: &Response) -> io::Result<()> {
-        let mut frame = Vec::with_capacity(256);
-        response.encode(&mut frame);
-
-        let mut stream = self.stream.lock().map_err(poisoned)?;
-        stream.write_all(&frame)?;
-        stream.flush()
+    pub fn close(&self) {
+        if let Some(stream) = &self.shutdown {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
     }
-
-    /// Writes one frame and the payload it declared, with nothing able to come
-    /// between them.
-    ///
-    /// The payload is copied straight from the blob file to the socket, so
-    /// serving a large entry costs a fixed-size buffer however large it is.
+    pub fn send(&self, response: &Response) -> io::Result<()> {
+        let mut writer = self.writer.lock().map_err(poisoned)?;
+        let Writer { stream, frame } = &mut *writer;
+        response.encode(frame);
+        if frame.len() > MAX_FRAME {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "outgoing control frame exceeds protocol limit",
+            ));
+        }
+        stream.write_all(frame)
+    }
     pub fn send_blob(
         &self,
         response: &Response,
         content: &mut impl Read,
         bytes: u64,
     ) -> io::Result<()> {
-        let mut frame = Vec::with_capacity(256);
-        response.encode(&mut frame);
-
-        let mut stream = self.stream.lock().map_err(poisoned)?;
-        stream.write_all(&frame)?;
-        let copied = io::copy(&mut content.take(bytes), &mut *stream)?;
-        stream.flush()?;
-
+        let mut writer = self.writer.lock().map_err(poisoned)?;
+        let Writer { stream, frame } = &mut *writer;
+        response.encode(frame);
+        stream.write_all(frame)?;
+        let copied = io::copy(&mut content.take(bytes), stream)?;
         if copied != bytes {
-            // The frame promised a count the payload did not meet, so the
-            // client's stream is now misaligned and cannot be recovered.
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                format!("blob ended {} bytes early", bytes - copied),
+                "blob ended before its declared length",
             ));
         }
         Ok(())
     }
 }
-
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> io::Error {
-    io::Error::other("a connection writer was poisoned by a panic")
+    io::Error::other("connection writer lock poisoned")
 }
 
-/// The connections that asked to be told when the archive changes.
-///
-/// Held weakly: a client that went away is dropped by its own thread, and the
-/// registry notices on the next broadcast rather than needing to be told.
+struct Subscriber {
+    out: Weak<Outbox>,
+    queue: SyncSender<Arc<Response>>,
+}
+type Registry = Mutex<HashMap<u64, Subscriber>>;
 #[derive(Default)]
 pub struct Watchers {
-    inner: Mutex<Vec<Weak<Outbox>>>,
+    inner: Arc<Registry>,
+    next: AtomicU64,
 }
-
-impl Watchers {
-    pub fn add(&self, out: &Arc<Outbox>) {
-        if let Ok(mut watchers) = self.inner.lock() {
-            watchers.push(Arc::downgrade(out));
+pub struct Subscription {
+    id: u64,
+    registry: Weak<Registry>,
+}
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        if let Some(registry) = self.registry.upgrade()
+            && let Ok(mut entries) = registry.lock()
+        {
+            entries.remove(&self.id);
         }
     }
-
-    /// Tells every watching connection what changed.
-    ///
-    /// A write that fails is a client that has gone or stopped reading; it is
-    /// dropped from the list rather than retried, because the archive must not
-    /// wait on anybody to keep recording.
+}
+impl Watchers {
+    pub fn add(&self, out: &Arc<Outbox>) -> Option<Subscription> {
+        let (queue, events) = mpsc::sync_channel::<Arc<Response>>(64);
+        let weak = Arc::downgrade(out);
+        std::thread::Builder::new()
+            .name("notify".into())
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                while let Ok(event) = events.recv() {
+                    let Some(out) = weak.upgrade() else { break };
+                    if out.send(&event).is_err() {
+                        out.close();
+                        break;
+                    }
+                }
+            })
+            .ok()?;
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        self.inner.lock().ok()?.insert(
+            id,
+            Subscriber {
+                out: Arc::downgrade(out),
+                queue,
+            },
+        );
+        Some(Subscription {
+            id,
+            registry: Arc::downgrade(&self.inner),
+        })
+    }
     pub fn broadcast(&self, event: &Response) {
-        let Ok(mut watchers) = self.inner.lock() else {
+        let Ok(mut entries) = self.inner.lock() else {
             return;
         };
-        watchers.retain(|weak| match weak.upgrade() {
-            Some(out) => out.send(event).is_ok(),
-            None => false,
+        let event = Arc::new(event.clone());
+        entries.retain(|_, subscription| {
+            let Some(out) = subscription.out.upgrade() else {
+                return false;
+            };
+            if subscription.queue.try_send(Arc::clone(&event)).is_err() {
+                out.close();
+                return false;
+            }
+            true
         });
     }
-
-    /// How many connections are still listening. The tests observe the
-    /// registry through this; nothing else needs to.
     #[cfg(test)]
     pub fn count(&self) -> usize {
         self.inner
             .lock()
-            .map(|watchers| watchers.iter().filter(|w| w.strong_count() > 0).count())
+            .map(|entries| {
+                entries
+                    .values()
+                    .filter(|entry| entry.out.strong_count() > 0)
+                    .count()
+            })
             .unwrap_or(0)
     }
 }
@@ -175,8 +220,8 @@ mod tests {
         let watchers = Watchers::default();
         let (first, mut first_peer) = pair();
         let (second, mut second_peer) = pair();
-        watchers.add(&first);
-        watchers.add(&second);
+        let _first_subscription = watchers.add(&first);
+        let _second_subscription = watchers.add(&second);
         assert_eq!(watchers.count(), 2);
 
         watchers.broadcast(&Response::Added { entry: summary(7) });
@@ -193,13 +238,27 @@ mod tests {
     fn a_connection_that_went_away_leaves_the_list_on_its_own() {
         let watchers = Watchers::default();
         let (out, peer) = pair();
-        watchers.add(&out);
+        let _subscription = watchers.add(&out);
 
         // The client's end closing is what a disconnect looks like from here.
         drop(peer);
         drop(out);
 
         watchers.broadcast(&Response::Cleared {});
+        assert_eq!(watchers.count(), 0);
+    }
+
+    #[test]
+    fn a_slow_watcher_does_not_block_the_producer_and_a_subscription_cleans_up() {
+        let watchers = Watchers::default();
+        let (out, _peer) = pair();
+        let subscription = watchers.add(&out);
+        let before = std::time::Instant::now();
+        for entry in 0..2000 {
+            watchers.broadcast(&Response::Removed { entry });
+        }
+        assert!(before.elapsed() < std::time::Duration::from_secs(1));
+        drop(subscription);
         assert_eq!(watchers.count(), 0);
     }
 }
