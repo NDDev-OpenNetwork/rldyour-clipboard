@@ -122,7 +122,16 @@ jobs:
           sleep 1
           PYTHONPATH=python/src uv run --no-project python scripts/e2e-sample.py
           if [[ "${RUNNER_OS}" == 'Linux' ]]; then
-            sudo apt-get update && sudo apt-get install --no-install-recommends -y gjs
+            # The hosted image can point at a transient azure mirror. Use the
+            # public HTTPS mirror and bounded retries so a mirror outage cannot
+            # consume the whole five-minute E2E step.
+            for source in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+              if [[ -f "${source}" ]]; then
+                sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "${source}"
+              fi
+            done
+            sudo apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
+            sudo apt-get install --no-install-recommends -y gjs
             gjs -m extension/tests/client.js
           else
             PYTHONPATH=python/src uv run --no-project python -c 'from rldyour_clipboard import Client; c=Client(role="both", watch=False); c.record([("text/plain", b"native socket synthetic")]); c.record([("text/plain", b"native socket synthetic large:" + b"x" * (3 * 1024 * 1024))]); c.close()'
