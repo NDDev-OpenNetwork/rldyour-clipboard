@@ -27,7 +27,9 @@ and stays outside the index lock. Control frames are limited to 64 KiB, active
 connections to 32, drafts to four per connection and representations to eight
 per draft. Watcher queues are bounded and writes time out; a slow reader cannot
 block capture. Large UI restores and BMP transcodes use private temporary
-files instead of extra full-size buffers. Native OS APIs may themselves
+files instead of extra full-size buffers. Mac restore payloads are mapped from
+an immediately unlinked file descriptor, leaving no persistent restore cache.
+Both desktop UIs cap a restored representation at 512 MiB. Native OS APIs may themselves
 materialize clipboard data; the archive does not promise constant memory for
 those APIs or image decoding.
 

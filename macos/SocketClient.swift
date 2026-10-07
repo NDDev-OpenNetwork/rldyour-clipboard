@@ -96,12 +96,14 @@ private final class Connection {
     }
     func transfer(entry: Int64, mime: String, directory: URL) throws -> ClipboardTransfer {
         let reply = try request("fetch", fields: ["entry": entry, "mime": mime])
-        guard reply.ev == "blob", let count = reply.bytes, count >= 0, let mime = reply.mime else { throw ClipboardFailure(message: "Неверный ответ с данными") }
+        guard reply.ev == "blob", let count = reply.bytes, count >= 0, count <= 512 * 1024 * 1024, let mime = reply.mime else { throw ClipboardFailure(message: "Неверный ответ с данными") }
         let url = directory.appendingPathComponent(UUID().uuidString)
-        let output = Darwin.open(url.path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0o600)
+        let output = Darwin.open(url.path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0o600)
         guard output >= 0 else { throw ClipboardFailure(message: "Не удалось создать временный файл") }
-        var complete = false
-        defer { Darwin.close(output); if !complete { try? FileManager.default.removeItem(at: url) } }
+        defer { Darwin.close(output) }
+        // Keep the file alive solely through its descriptor. A crash or failed
+        // restore cannot leave clipboard payloads in a persistent temp cache.
+        guard Darwin.unlink(url.path) == 0 else { throw ClipboardFailure(message: "Не удалось удалить имя временного файла") }
         var remaining = count
         while remaining > 0 {
             let data: Data
@@ -118,8 +120,14 @@ private final class Connection {
             }
             remaining -= Int64(data.count)
         }
-        complete = true
-        return ClipboardTransfer(mime: mime, url: url)
+        if count == 0 { return ClipboardTransfer(mime: mime, data: Data()) }
+        let length = Int(count)
+        let mapped = Darwin.mmap(nil, length, PROT_READ, MAP_PRIVATE, output, 0)
+        guard let mapped, mapped != MAP_FAILED else { throw ClipboardFailure(message: "Не удалось отобразить данные записи") }
+        let data = Data(bytesNoCopy: mapped, count: length, deallocator: .custom { pointer, count in
+            _ = Darwin.munmap(pointer, count)
+        })
+        return ClipboardTransfer(mime: mime, data: data)
     }
 }
 

@@ -124,7 +124,7 @@ jobs:
             sudo apt-get update && sudo apt-get install --no-install-recommends -y gjs
             gjs -m extension/tests/client.js
           else
-            PYTHONPATH=python/src uv run --no-project python -c 'from rldyour_clipboard import Client; c=Client(role="both", watch=False); c.record([("text/plain", b"native socket synthetic")]); c.close()'
+            PYTHONPATH=python/src uv run --no-project python -c 'from rldyour_clipboard import Client; c=Client(role="both", watch=False); c.record([("text/plain", b"native socket synthetic")]); c.record([("text/plain", b"native socket synthetic large:" + b"x" * (3 * 1024 * 1024))]); c.close()'
             swiftc -swift-version 6 -parse-as-library -warnings-as-errors macos/Models.swift macos/SocketClient.swift macos/tests/SocketTests.swift -o /tmp/clipboard-socket-test
             /tmp/clipboard-socket-test "${RLDYOUR_CLIPBOARD_HOME}/rldyour-clipboard.sock"
           fi
