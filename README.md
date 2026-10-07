@@ -84,7 +84,8 @@ code and agents, preserving the archive.
 ## Windows
 
 The daemon captures using `AddClipboardFormatListener`, without polling. It
-normalizes CF_HTML, CF_DIB and file references into portable MIME formats.
+normalizes CF_HTML and CF_DIB into portable MIME formats; native CF_HDROP file
+reference capture is not yet implemented.
 The Windows release contains the daemon; there is no Windows history GUI yet.
 Create `%LOCALAPPDATA%\rldyour-clipboard`, copy the executable there and register
 it under the current user's `Run` key to start at sign-in:
