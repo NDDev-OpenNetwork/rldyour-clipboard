@@ -5,7 +5,7 @@
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
-import {FrameReader} from './framing.js';
+import {FrameReader, sliceBytes} from './framing.js';
 
 const SOCKET_NAME = 'rldyour-clipboard.sock';
 const PROTOCOL_VERSION = 1;
@@ -142,7 +142,7 @@ export class Client {
         if (output === null) throw new Error('not connected');
         let offset = 0;
         while (offset < bytes.get_size()) {
-            const remaining = GLib.Bytes.new_from_bytes(bytes, offset, bytes.get_size() - offset);
+            const remaining = sliceBytes(bytes, offset, bytes.get_size() - offset);
             if (connection !== this._connection || this._stopped) throw new Error('clipboard connection changed');
             const written = await output.write_bytes_async(remaining,
                 GLib.PRIORITY_DEFAULT, this._cancellable);

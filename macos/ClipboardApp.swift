@@ -144,7 +144,7 @@ import Foundation
         pin.toolTip = entry.pinned ? "Открепить: снова действует срок последнего копирования" : "Закрепить бессрочно"
         pin.setAccessibilityLabel(entry.pinned ? "Открепить \(entry.caption)" : "Закрепить \(entry.caption)")
         let row = NSStackView(views: [copy, pin])
-        row.orientation = .horizontal; row.spacing = 8
+        row.orientation = .horizontal; row.spacing = 8; row.distribution = .fill
         row.translatesAutoresizingMaskIntoConstraints = false
         rows.addArrangedSubview(row)
         NSLayoutConstraint.activate([
@@ -161,16 +161,17 @@ import Foundation
                 guard let self else { return }
                 switch result {
                 case .success: self.reload()
-                case .failure(let error): self.note.stringValue = error.localizedDescription; self.reload()
+                case .failure(let error): self.note.stringValue = error.localizedDescription; sender.isEnabled = true
                 }
             }
         }
     }
     @objc private func copyEntry(_ sender: EntryButton) {
+        let token = generation
         sender.isEnabled = false
         client.fetch(sender.entry) { [weak self] result in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, token == self.generation, self.panel.isVisible else { return }
                 switch result {
                 case .success(let transfers):
                     do {
@@ -187,6 +188,7 @@ import Foundation
                                 } else { formats.append((NSPasteboard.PasteboardType(uti), data)) }
                             }
                         }
+                        guard !formats.isEmpty || !fileURLs.isEmpty else { throw ClipboardFailure(message: "Запись не содержит поддерживаемых данных") }
                         #if !CLIPBOARD_QA
                         let board = NSPasteboard.general
                         board.clearContents()

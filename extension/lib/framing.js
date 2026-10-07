@@ -10,6 +10,17 @@ Gio._promisify(Gio.File.prototype, 'create_async', 'create_finish');
 Gio._promisify(Gio.OutputStream.prototype, 'write_bytes_async', 'write_bytes_finish');
 Gio._promisify(Gio.OutputStream.prototype, 'close_async', 'close_finish');
 
+// GLib's introspection changed this boxed constructor from an instance method
+// to a static constructor. GNOME 46 and GNOME 50 must both keep short writes
+// correct without copying the entire representation.
+export function sliceBytes(bytes, offset, count) {
+    if (typeof GLib.Bytes.new_from_bytes === 'function')
+        return GLib.Bytes.new_from_bytes(bytes, offset, count);
+    if (typeof bytes.new_from_bytes === 'function')
+        return bytes.new_from_bytes(offset, count);
+    return new GLib.Bytes(bytes.get_data().subarray(offset, offset + count));
+}
+
 export class FrameReader {
     constructor(input, cancellable) {
         this._input = input;
@@ -82,7 +93,7 @@ export class FrameReader {
             const write = async bytes => {
                 let offset = 0;
                 while (offset < bytes.get_size()) {
-                    const remaining = GLib.Bytes.new_from_bytes(bytes, offset, bytes.get_size() - offset);
+                    const remaining = sliceBytes(bytes, offset, bytes.get_size() - offset);
                     const n = await output.write_bytes_async(remaining,
                         GLib.PRIORITY_DEFAULT, this._cancellable);
                     if (n <= 0)

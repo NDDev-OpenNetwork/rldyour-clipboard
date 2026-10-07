@@ -27,7 +27,7 @@ async function test() {
     await client.remove(committed.entry);
     print('PASS: GJS handshake, serialized upload+query, pin/favorites, restore and metadata');
 }
-const timeout = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 15, () => { error = new Error('client timeout'); client.stop(); loop.quit(); return GLib.SOURCE_REMOVE; });
+let timeout = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 15, () => { timeout = 0; error = new Error('client timeout'); client.stop(); loop.quit(); return GLib.SOURCE_REMOVE; });
 loop.run();
-GLib.Source.remove(timeout);
+if (timeout) GLib.Source.remove(timeout);
 if (error) throw error;
