@@ -24,7 +24,7 @@ pub const SOCKET_NAME: &str = "rldyour-clipboard.sock";
 pub fn socket_path() -> std::io::Result<std::path::PathBuf> {
     if let Some(root) = std::env::var_os("RLDYOUR_CLIPBOARD_HOME") {
         let directory = std::path::PathBuf::from(root);
-        std::fs::create_dir_all(&directory)?;
+        crate::storage_fs::private_dir(&directory)?;
         return Ok(directory.join(SOCKET_NAME));
     }
 
@@ -40,7 +40,7 @@ pub fn socket_path() -> std::io::Result<std::path::PathBuf> {
     {
         // Everywhere else the socket sits beside the archive it serves.
         let directory = crate::store::default_root()?;
-        std::fs::create_dir_all(&directory)?;
+        crate::storage_fs::private_dir(&directory)?;
         Ok(directory.join(SOCKET_NAME))
     }
 }

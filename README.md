@@ -17,6 +17,7 @@ successive wakes. Cleanup removes metadata, search rows and unreferenced blobs.
 |---|---|
 | Rust `config` / `server` / `maintenance` | Policy, bounded connections, lifecycle and expiry |
 | Rust `store` | SQLite metadata/FTS, content-addressed blobs, leases, thumbnails |
+| Rust `storage_fs` | Private archive paths, platform file opens and pin synchronization |
 | Rust `capture` | Native macOS/Windows watchers; X11 XFIXES on Linux |
 | GNOME extension | Wayland selection access, async streaming, picker and restore |
 | macOS AppKit client | Menu, search, paging, pinning, multi-format restore |
@@ -36,7 +37,10 @@ those APIs or image decoding.
 The default disk budget is 5 GiB. Oldest unpinned entries are evicted under
 pressure; pins are preserved. A single entry larger than the budget is refused.
 Pins may exhaust that budget, leaving no room for new unpinned entries. The
-archive is private (0700 directory / 0600 Unix socket), local and unencrypted.
+archive is private (0700 directory / 0600 newly created files and Unix socket),
+local and unencrypted. Archive paths must be absolute and must not pass through
+symlinks, Windows reparse points or `..` components. Keep a custom archive on
+its real path; existing redirected archives must be relocated before upgrading.
 Password-manager, concealed, transient and clipboard-history exclusion hints
 are checked before capture and again before commit. These hints depend on the
 source application; the utility cannot identify arbitrary unmarked secrets.
@@ -118,7 +122,11 @@ daemon afterwards. Defaults apply to existing archives on upgrade too.
 
 SQLite holds metadata and full-text search; `blobs/` holds immutable content by
 digest. An exclusive archive lock prevents a second daemon touching the same
-store. Linux normally uses a runtime socket managed by systemd; macOS uses a
+store. A pin flushes its content and commits with SQLite FULL synchronization;
+POSIX additionally flushes blob directory entries. Windows flushes file buffers
+and WAL without a portable directory-flush guarantee. Storage hardware and
+filesystem behavior still determine recovery after a power failure.
+Linux normally uses a runtime socket managed by systemd; macOS uses a
 launchd listener and starts capture at login. A manager-owned daemon idle-exits
 only when no native watcher is active. Keep the archive on a local filesystem.
 
@@ -130,7 +138,7 @@ Python/CLI uses standard Unix sockets on Linux/macOS (CPython does not expose
 AF_UNIX on Windows); Windows clients can use .NET Unix-domain sockets instead.
 
 ```sh
-uv tool install ./rldyour_clipboard-0.2.0-py3-none-any.whl
+uv tool install ./rldyour_clipboard-0.2.1-py3-none-any.whl
 rldyour-clipboard list --favorites
 rldyour-clipboard pin 42
 rldyour-clipboard unpin 42

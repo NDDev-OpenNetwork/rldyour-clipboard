@@ -75,8 +75,8 @@ pub struct Written {
 
 impl Blobs {
     pub fn open(root: PathBuf) -> io::Result<Self> {
-        fs::create_dir_all(&root)?;
-        fs::create_dir_all(root.join("incoming"))?;
+        crate::storage_fs::private_dir(&root)?;
+        crate::storage_fs::private_dir(&root.join("incoming"))?;
         Ok(Self {
             root,
             leases: Arc::new(Mutex::new(HashMap::new())),
@@ -101,7 +101,20 @@ impl Blobs {
     }
 
     pub fn open_read(&self, digest: &str) -> io::Result<File> {
-        File::open(self.path(digest)?)
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        crate::storage_fs::private_open(&self.path(digest)?, &mut options)
+    }
+
+    pub fn sync_pinned(&self, digest: &str) -> io::Result<()> {
+        let path = self.path(digest)?;
+        // Flush file content without reading clipboard payloads, then persist
+        // its published directory entries on POSIX before the durable pin.
+        crate::storage_fs::sync_file(&path)?;
+        crate::storage_fs::sync_parent(&path)?;
+        crate::storage_fs::sync_directory(&self.root)?;
+        crate::storage_fs::sync_parent(&self.root)?;
+        Ok(())
     }
 
     /// Private transient output, never published into the archive/index.
@@ -109,12 +122,7 @@ impl Blobs {
         let path = self.root.join("incoming").join(temporary_name());
         let mut options = fs::OpenOptions::new();
         options.read(true).write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options.open(&path)?;
+        let file = crate::storage_fs::private_open(&path, &mut options)?;
         Ok(ScratchFile { file, path })
     }
 
@@ -140,7 +148,9 @@ impl Blobs {
     /// pass and one hash.
     pub fn writer(&self) -> io::Result<Writer<'_>> {
         let incoming = self.root.join("incoming").join(temporary_name());
-        let file = File::create(&incoming)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        let file = crate::storage_fs::private_open(&incoming, &mut options)?;
         Ok(Writer {
             blobs: self,
             file: Some(file),
@@ -164,7 +174,9 @@ impl Blobs {
         if leases.contains_key(digest) {
             return Ok(false);
         }
-        match fs::remove_file(self.path(digest)?) {
+        let path = self.path(digest)?;
+        crate::storage_fs::regular(&path)?;
+        match fs::remove_file(path) {
             Ok(()) => Ok(true),
             // The index is the authority on what exists. A blob already gone
             // from the disk is the state the caller wanted.
@@ -244,6 +256,7 @@ impl Writer<'_> {
         let digest = hex(&std::mem::take(&mut self.hasher).finalize());
         let bytes = self.bytes;
         let destination = self.blobs.path(&digest)?;
+        crate::storage_fs::regular(&destination)?;
         let mut leases = self
             .blobs
             .leases
@@ -267,7 +280,7 @@ impl Writer<'_> {
 
         let published = (|| {
             if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent)?;
+                crate::storage_fs::private_dir(parent)?;
             }
             fs::rename(&self.incoming, &destination)
         })();

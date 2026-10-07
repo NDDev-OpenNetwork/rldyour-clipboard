@@ -113,6 +113,7 @@ jobs:
         shell: bash
         run: |
           RLDYOUR_CLIPBOARD_HOME="$(mktemp -d /tmp/cb.XXXX)"
+          RLDYOUR_CLIPBOARD_HOME="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "${RLDYOUR_CLIPBOARD_HOME}")"
           export RLDYOUR_CLIPBOARD_HOME
           export RLDYOUR_CLIPBOARD_CAPTURE=0
           ./daemon/target/release/rldyour-clipboardd &

@@ -12,6 +12,7 @@ from rldyour_clipboard import Client
 
 binary = pathlib.Path(__file__).resolve().parents[1] / 'daemon/target/release/rldyour-clipboardd'
 with tempfile.TemporaryDirectory(prefix='cb-', dir='/tmp') as root:
+    root = str(pathlib.Path(root).resolve())
     env = dict(os.environ, RLDYOUR_CLIPBOARD_HOME=root, RLDYOUR_CLIPBOARD_CAPTURE='0')
     for key in ('LISTEN_PID', 'LISTEN_FDS', 'LISTEN_FDNAMES'):
         env.pop(key, None)

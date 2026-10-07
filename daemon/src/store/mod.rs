@@ -118,20 +118,14 @@ impl Store {
         budget: i64,
         retention_seconds: Option<i64>,
     ) -> Result<Self> {
-        std::fs::create_dir_all(root)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
+        crate::storage_fs::private_dir(root)?;
+        for name in ["index.db", "index.db-wal", "index.db-shm", "daemon.lock"] {
+            crate::storage_fs::regular(&root.join(name))?;
         }
         let mut options = std::fs::OpenOptions::new();
         options.create(true).truncate(false).read(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let archive_lock = options.open(root.join("daemon.lock"))?;
+        let archive_lock =
+            crate::storage_fs::private_open(&root.join("daemon.lock"), &mut options)?;
         archive_lock
             .try_lock()
             .map_err(|error| io::Error::other(format!("archive already in use: {error}")))?;
@@ -471,6 +465,16 @@ impl Store {
 
     pub fn set_pinned(&self, entry: i64, pinned: bool) -> Result<Option<Summary>> {
         let index = self.index.lock().expect("index lock");
+        if pinned {
+            if index.summary(entry)?.is_none() {
+                return Ok(None);
+            }
+            // Complete filesystem publication before making the FULL-synced
+            // pin visible. Missing/redirected content must not claim success.
+            for digest in index.entry_digests(entry)? {
+                self.blobs.sync_pinned(&digest)?;
+            }
+        }
         if !index.set_pinned(entry, pinned)? {
             return Ok(None);
         }
@@ -558,6 +562,7 @@ impl Store {
         let blob_root = root.join("blobs");
         for shard in std::fs::read_dir(&blob_root)? {
             let shard = shard?.path();
+            crate::storage_fs::plain(&shard)?;
             if !shard.is_dir() || shard.file_name().is_some_and(|name| name == "incoming") {
                 continue;
             }
@@ -688,6 +693,43 @@ pub fn default_root() -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_blob_cannot_be_claimed_as_a_durable_pin() {
+        let dir = crate::testing::TempDir::new();
+        let store = Store::open(dir.path(), DEFAULT_BUDGET).unwrap();
+        let part = store
+            .accept("text/plain", &mut io::Cursor::new(b"synthetic-kept"), 14)
+            .unwrap();
+        let digest = part.digest.clone();
+        let entry = store.commit(&[part], None, 100).unwrap().unwrap().entry;
+        let path = dir
+            .path()
+            .join("blobs")
+            .join(&digest[..2])
+            .join(&digest[2..]);
+        std::fs::remove_file(path).unwrap();
+        assert!(store.set_pinned(entry, true).is_err());
+        assert!(!store.summary(entry).unwrap().unwrap().pinned);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn redirected_root_and_database_fail_without_changing_external_content() {
+        let dir = crate::testing::TempDir::new();
+        let actual = dir.path().join("actual");
+        std::fs::create_dir(&actual).unwrap();
+        let linked = dir.path().join("linked");
+        std::os::unix::fs::symlink(&actual, &linked).unwrap();
+        assert!(Store::open(&linked, DEFAULT_BUDGET).is_err());
+        assert!(!actual.join("index.db").exists());
+        let root = dir.path().join("archive");
+        std::fs::create_dir(&root).unwrap();
+        let secret = dir.path().join("external-data");
+        std::fs::write(&secret, b"synthetic-private").unwrap();
+        std::os::unix::fs::symlink(&secret, root.join("index.db")).unwrap();
+        assert!(Store::open(&root, DEFAULT_BUDGET).is_err());
+        assert_eq!(std::fs::read(secret).unwrap(), b"synthetic-private");
+    }
     use crate::testing::TempDir;
 
     fn store(budget: i64) -> (Store, TempDir) {

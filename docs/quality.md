@@ -8,7 +8,14 @@ and garbage collection rechecks references under the index lock. Failed and
 abandoned drafts release leases and remove unreferenced bytes. A process-wide
 archive file lock also prevents a second daemon from sweeping incoming files.
 
-Pins use a FULL-synchronous commit so the explicit keep action synchronizes WAL.
+Pins first flush every referenced blob and thumbnail without reading payloads.
+POSIX then synchronizes the fanout, blob-root and archive directory entries
+before the FULL-synchronous SQLite commit. This covers content publication as
+well as the keep flag. Missing or redirected content fails before setting pin.
+Windows uses a writable handle for file-buffer flush and synchronizes SQLite
+WAL; it has no portable directory-fsync guarantee. Filesystem/hardware behavior
+still bounds durability. Rust's `sync_all()` uses `F_FULLFSYNC` on Apple;
+SQLite's FULL commit follows its own platform synchronization policy.
 Ordinary capture uses NORMAL with SQLite's default checkpoints for lower write
 cost; recent unpinned captures may roll back after power loss. The archive must
 stay on a local filesystem. Bundled SQLite 3.53.2 includes the WAL-reset fix
@@ -35,6 +42,11 @@ and disables writes to the actual system pasteboard.
 ## Primary references checked 2026-10-07
 
 - [SQLite WAL, durability and WAL-reset bug](https://www.sqlite.org/wal.html).
+- [SQLite synchronous policy](https://www.sqlite.org/pragma.html#pragma_synchronous).
+- [Linux fsync and directory entries](https://man7.org/linux/man-pages/man2/fsync.2.html).
+- [Windows FlushFileBuffers handle requirements](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers).
+- [Rust platform synchronization implementation](https://doc.rust-lang.org/src/std/sys/fs/unix.rs.html).
+- [Apple synchronization and disk-write costs](https://developer.apple.com/documentation/xcode/reducing-disk-writes).
 - [Rust File::try_lock](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock).
 - [Apple NSPasteboard](https://developer.apple.com/documentation/appkit/nspasteboard).
 - [GNOME extension best practices and teardown](https://gjs.guide/extensions/review-guidelines/best-practices.html).

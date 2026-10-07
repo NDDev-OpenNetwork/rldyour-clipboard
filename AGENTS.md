@@ -10,12 +10,13 @@ inside the daemon.
 | Path | What it is |
 |---|---|
 | `daemon/` | Rust daemon: `capture/` (per-OS backends: `x11.rs`, `macos.rs`, `windows.rs`), `store/` (SQLite index + content-addressed blobs + thumbnails), `config.rs`, `server.rs`, `maintenance.rs`, `net.rs`, `proto.rs`, `session.rs`, `kind.rs` (mime ranking / sensitive hints / protocol-target filtering) |
+| `daemon/src/storage_fs/` | Common absolute/regular path boundary, private file creation, POSIX no-follow/directory sync and Windows reparse/open/file-flush semantics |
 | `extension/` | GNOME Shell extension (GNOME 46–50): `lib/capture.js`, `restore.js`, `client.js`, `mimes.js`, `indicator.js` |
 | `macos/` | Native AppKit menu; typed models, bounded streaming socket client, UI; Swift 6, macOS 12+ |
 | `python/` | Dependency-free protocol client + CLI |
 | `daemon/systemd/` | `rldyour-clipboardd.{service,socket}` — socket-activated, sandboxed |
 | `daemon/launchd/` | macOS agent plist (`launch_activate_socket("sock")` contract) |
-| `scripts/` | `check-consistency.sh`, `check-extension.sh`, `e2e-sample.py`, `install.sh` |
+| `scripts/` | Consistency/version checks and synthetic integration tests; platform installers live at the repository root |
 
 ## Verify
 
@@ -24,7 +25,9 @@ cd daemon && cargo test --all-features && cargo clippy --all-targets --all-featu
 ./scripts/check-extension.sh && gjs -m extension/tests/smoke.js
 cd python && python3 -m pytest
 ./scripts/check-consistency.sh
-RLDYOUR_CLIPBOARD_CAPTURE=0 RLDYOUR_CLIPBOARD_HOME=$(mktemp -d /tmp/cb.XXXX) ./daemon/target/debug/rldyour-clipboardd &
+test_root=$(mktemp -d /tmp/cb.XXXX)
+export RLDYOUR_CLIPBOARD_HOME=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$test_root")
+RLDYOUR_CLIPBOARD_CAPTURE=0 ./daemon/target/debug/rldyour-clipboardd &
 ./scripts/e2e-sample.py   # against the spawned daemon's socket
 ```
 
@@ -77,6 +80,14 @@ the script.
   maintenance expire only unpinned entries, at most 4 batches of 256 per wake.
   Pinning uses a FULL-synchronous SQLite commit; unpinning restores the age
   policy and never refreshes the timestamp. Leases protect unfinished drafts.
+- Pin acknowledgement requires content buffers to flush first; POSIX also
+  syncs blob/fanout/archive directory entries. Missing/redirected content cannot
+  become a successful pin. Windows flushes a writable file handle and SQLite
+  WAL; do not claim a portable directory-fsync or hardware power-loss guarantee.
+- Archive root/lock/index/WAL/SHM and blob paths must not cross redirects or
+  special files. Incoming publication uses create_new and private modes, never
+  follows a redirected archive path. Same-user deliberate replacement remains
+  outside this boundary. Canonicalize only synthetic system temp roots in tests.
 - Never inspect, dump or export a user's clipboard for tests. Use synthetic
   fixtures, including the macOS `CLIPBOARD_QA` build (which never writes the
   system pasteboard), and restrict live checks to service/aggregate metadata.

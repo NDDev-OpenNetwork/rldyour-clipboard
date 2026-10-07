@@ -18,7 +18,7 @@ impl TempDir {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&path).unwrap();
-        Self(path)
+        Self(path.canonicalize().unwrap())
     }
 
     pub fn path(&self) -> &Path {
