@@ -70,6 +70,7 @@ import Foundation
         container.addSubview(stack)
         stack.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(equalToConstant: 500),
             stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
             stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
             stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
@@ -153,6 +154,7 @@ import Foundation
             pin.widthAnchor.constraint(equalToConstant: 36)
         ])
         copy.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        copy.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
     }
     @objc private func pinEntry(_ sender: EntryButton) {
         sender.isEnabled = false
